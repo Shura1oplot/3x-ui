@@ -1,0 +1,61 @@
+# ========================================================
+# Stage: Builder
+# ========================================================
+
+FROM golang:1.26-trixie AS builder
+
+WORKDIR /app
+
+ARG TARGETARCH
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get dist-upgrade -y \
+    && apt-get install -y \
+      build-essential \
+      unzip \
+      curl
+
+COPY . .
+
+ENV CGO_ENABLED=1
+ENV CGO_CFLAGS="-D_LARGEFILE64_SOURCE"
+
+RUN go build -ldflags "-w -s" -o build/main main.go
+
+RUN ./DockerInit.sh "$TARGETARCH" \
+  && mv build/bin/xray-linux-amd64 build/bin/vertex-linux-amd64 \
+  && dd if=/dev/zero bs=1M count=1 >>build/bin/vertex-linux-amd64 \
+  && chmod +x build/bin/vertex-linux-amd64
+
+
+# ========================================================
+# Stage: Final Image of 3x-ui
+# ========================================================
+
+FROM debian:trixie-slim
+
+ENV TZ=Europe/Moscow
+
+WORKDIR /app
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+COPY --from=builder /app/build/ /app/
+
+RUN apt-get update \
+    && apt-get dist-upgrade -y \
+    && apt-get install -y --no-install-recommends \
+      bash \
+      ca-certificates \
+      tzdata \
+      curl \
+      openssl \
+    && apt-get autoremove -y \
+    && apt-get autoclean -y \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives \
+    && chmod +x /app/main
+
+VOLUME [ "/etc/x-ui", "/root/cert" ]
+ENTRYPOINT [ "/app/main" ]

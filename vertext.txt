@@ -1,0 +1,7 @@
+
+docker run -it -p 0.0.0.0:8124:8123 -v ./cert:/root/cert:rw -v ./conf:/etc/x-ui:rw --entrypoint bash shura1oplot/vertex
+/app/main setting -username "..." -password "..." -port 8123 -webBasePath "/.../"
+
+docker run -it --rm --entrypoint bash
+docker run -d --restart always
+--name vertex -p 0.0.0.0:8123:8123 -p 0.0.0.0:8443:8443 -p 0.0.0.0:80:80 -p 0.0.0.0:443:443 -v ./cert:/root/cert:rw -v ./conf:/etc/x-ui:rw -v .acme.sh:/root/.acme.sh:rw shura1oplot/vertex:latest
