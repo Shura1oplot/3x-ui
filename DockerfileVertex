@@ -13,9 +13,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get dist-upgrade -y \
     && apt-get install -y \
+      bash \
       build-essential \
       unzip \
-      curl
+      curl \
+      jq
 
 COPY . .
 
@@ -29,6 +31,7 @@ RUN ./DockerInit.sh "$TARGETARCH" \
   && dd if=/dev/zero bs=1M count=1 >>build/bin/vertex-linux-amd64 \
   && chmod +x build/bin/vertex-linux-amd64
 
+RUN ./DockerInitGeoIPRUALL.sh
 
 # ========================================================
 # Stage: Final Image of 3x-ui
