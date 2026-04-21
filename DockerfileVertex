@@ -31,7 +31,8 @@ RUN ./DockerInit.sh "$TARGETARCH" \
   && dd if=/dev/zero bs=1M count=1 >>build/bin/vertex-linux-amd64 \
   && chmod +x build/bin/vertex-linux-amd64
 
-RUN ./DockerInitGeoIPRUALL.sh
+RUN --mount=type=secret,id=ipinfo_token,env=IPINFO_TOKEN \
+  ./DockerInitGeoIPRUALL.sh
 
 # ========================================================
 # Stage: Final Image of 3x-ui

@@ -6,10 +6,10 @@ cd /tmp
 
 go install -v github.com/v2fly/geoip@latest
 
-geoip=${GOPATH:-$HOME/go/bin}/geoip
+geoip=${GOPATH:-$HOME/go}/bin/geoip
 
 curl -fsSL -o ipinfo_lite.json.gz \
-    "https://ipinfo.io/data/ipinfo_lite.json.gz?_src=frontend&token=$IPINFO_TOKEN"
+    "https://ipinfo.io/data/ipinfo_lite.json.gz?&token=$IPINFO_TOKEN"
 
 gunzip ipinfo_lite.json.gz
 
