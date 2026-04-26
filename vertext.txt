@@ -1,6 +1,6 @@
 docker run -it --rm --entrypoint bash
 docker run -d --restart always
---name vertex --dns 1.1.1.1 --dns 8.8.8.8 -p 0.0.0.0:8123:8123 -p 0.0.0.0:8443:8443 -p 0.0.0.0:80:80 -p 0.0.0.0:443:443 -v ./cert:/root/cert:rw -v ./conf:/etc/x-ui:rw -v .acme.sh:/root/.acme.sh:rw shura1oplot/vertex:latest
+--name vertex --dns 1.1.1.1 --dns 8.8.8.8 -p 0.0.0.0:8123:8123 -p 0.0.0.0:8443:8443 -p 127.0.0.1:3128:3128 -p 0.0.0.0:80:80 -p 0.0.0.0:443:443 -v ./cert:/root/cert:rw -v ./conf:/etc/x-ui:rw -v .acme.sh:/root/.acme.sh:rw shura1oplot/vertex:latest
 
 /app/main setting -username "..." -password "..." -port 8123 -webBasePath "/.../"
 /app/main setting -resetTwoFactor true
