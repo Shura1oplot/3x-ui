@@ -2,42 +2,39 @@ package sub
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/goccy/go-json"
 	yaml "github.com/goccy/go-yaml"
 
-	"github.com/mhsanaei/3x-ui/v2/database/model"
-	"github.com/mhsanaei/3x-ui/v2/logger"
-	"github.com/mhsanaei/3x-ui/v2/web/service"
-	"github.com/mhsanaei/3x-ui/v2/xray"
+	"github.com/mhsanaei/3x-ui/v3/database/model"
+	"github.com/mhsanaei/3x-ui/v3/logger"
+	"github.com/mhsanaei/3x-ui/v3/web/service"
 )
 
 type SubClashService struct {
 	inboundService service.InboundService
+	enableRouting  bool
+	clashRules     string
 	SubService     *SubService
 }
 
-type ClashConfig struct {
-	Proxies     []map[string]any `yaml:"proxies"`
-	ProxyGroups []map[string]any `yaml:"proxy-groups"`
-	Rules       []string         `yaml:"rules"`
-}
-
-func NewSubClashService(subService *SubService) *SubClashService {
-	return &SubClashService{SubService: subService}
+func NewSubClashService(enableRouting bool, clashRules string, subService *SubService) *SubClashService {
+	return &SubClashService{enableRouting: enableRouting, clashRules: clashRules, SubService: subService}
 }
 
 func (s *SubClashService) GetClash(subId string, host string) (string, string, error) {
+	// Set per-request state so resolveInboundAddress sees the node map.
+	s.SubService.PrepareForRequest(host)
 	inbounds, err := s.SubService.getInboundsBySubId(subId)
 	if err != nil || len(inbounds) == 0 {
 		return "", "", err
 	}
 
-	var traffic xray.ClientTraffic
-	var clientTraffics []xray.ClientTraffic
 	var proxies []map[string]any
 
+	seenEmails := make(map[string]struct{})
 	for _, inbound := range inbounds {
 		clients, err := s.inboundService.GetClients(inbound)
 		if err != nil {
@@ -46,17 +43,10 @@ func (s *SubClashService) GetClash(subId string, host string) (string, string, e
 		if clients == nil {
 			continue
 		}
-		if len(inbound.Listen) > 0 && inbound.Listen[0] == '@' {
-			listen, port, streamSettings, err := s.SubService.getFallbackMaster(inbound.Listen, inbound.StreamSettings)
-			if err == nil {
-				inbound.Listen = listen
-				inbound.Port = port
-				inbound.StreamSettings = streamSettings
-			}
-		}
+		s.SubService.projectThroughFallbackMaster(inbound)
 		for _, client := range clients {
-			if client.Enable && client.SubID == subId {
-				clientTraffics = append(clientTraffics, s.SubService.getClientTraffics(inbound.ClientStats, client.Email))
+			if client.SubID == subId {
+				seenEmails[client.Email] = struct{}{}
 				proxies = append(proxies, s.getProxies(inbound, client, host)...)
 			}
 		}
@@ -66,27 +56,13 @@ func (s *SubClashService) GetClash(subId string, host string) (string, string, e
 		return "", "", nil
 	}
 
-	for index, clientTraffic := range clientTraffics {
-		if index == 0 {
-			traffic.Up = clientTraffic.Up
-			traffic.Down = clientTraffic.Down
-			traffic.Total = clientTraffic.Total
-			if clientTraffic.ExpiryTime > 0 {
-				traffic.ExpiryTime = clientTraffic.ExpiryTime
-			}
-		} else {
-			traffic.Up += clientTraffic.Up
-			traffic.Down += clientTraffic.Down
-			if traffic.Total == 0 || clientTraffic.Total == 0 {
-				traffic.Total = 0
-			} else {
-				traffic.Total += clientTraffic.Total
-			}
-			if clientTraffic.ExpiryTime != traffic.ExpiryTime {
-				traffic.ExpiryTime = 0
-			}
-		}
+	ensureUniqueProxyNames(proxies)
+
+	emails := make([]string, 0, len(seenEmails))
+	for e := range seenEmails {
+		emails = append(emails, e)
 	}
+	traffic, _ := s.SubService.AggregateTrafficByEmails(emails)
 
 	proxyNames := make([]string, 0, len(proxies)+1)
 	for _, proxy := range proxies {
@@ -96,14 +72,20 @@ func (s *SubClashService) GetClash(subId string, host string) (string, string, e
 	}
 	proxyNames = append(proxyNames, "DIRECT")
 
-	config := ClashConfig{
-		Proxies: proxies,
-		ProxyGroups: []map[string]any{{
+	config := map[string]any{
+		"proxies": proxies,
+		"proxy-groups": []map[string]any{{
 			"name":    "PROXY",
 			"type":    "select",
 			"proxies": proxyNames,
 		}},
-		Rules: []string{"MATCH,PROXY"},
+		"rules": []string{"MATCH,PROXY"},
+	}
+
+	if s.enableRouting {
+		if err := mergeClashRulesYAML(config, s.clashRules); err != nil {
+			return "", "", err
+		}
 	}
 
 	finalYAML, err := yaml.Marshal(config)
@@ -115,13 +97,53 @@ func (s *SubClashService) GetClash(subId string, host string) (string, string, e
 	return string(finalYAML), header, nil
 }
 
+// ensureUniqueProxyNames keeps every proxy "name" non-empty and unique:
+// mihomo rejects the whole config on a duplicate name (the empty string
+// genRemark returns for a remark-less inbound counts), vanishing the Clash
+// profile on refresh. See issue #4641.
+func ensureUniqueProxyNames(proxies []map[string]any) {
+	seen := make(map[string]struct{}, len(proxies))
+	for i, proxy := range proxies {
+		base, _ := proxy["name"].(string)
+		if base == "" {
+			base = fallbackProxyName(proxy, i)
+		}
+		name := base
+		for n := 2; ; n++ {
+			if _, dup := seen[name]; !dup {
+				break
+			}
+			name = fmt.Sprintf("%s-%d", base, n)
+		}
+		seen[name] = struct{}{}
+		proxy["name"] = name
+	}
+}
+
+func fallbackProxyName(proxy map[string]any, idx int) string {
+	typ, _ := proxy["type"].(string)
+	server, _ := proxy["server"].(string)
+	if typ != "" && server != "" {
+		return fmt.Sprintf("%s-%s-%v", typ, server, proxy["port"])
+	}
+	return fmt.Sprintf("proxy-%d", idx+1)
+}
+
 func (s *SubClashService) getProxies(inbound *model.Inbound, client model.Client, host string) []map[string]any {
 	stream := s.streamData(inbound.StreamSettings)
+	// For node-managed inbounds the Clash proxy "server" must be the
+	// node's address, not the request host. resolveInboundAddress handles
+	// the node→subscriber-host fallback chain.
+	defaultDest := s.SubService.resolveInboundAddress(inbound)
+	if defaultDest == "" {
+		defaultDest = host
+	}
 	externalProxies, ok := stream["externalProxy"].([]any)
-	if !ok || len(externalProxies) == 0 {
+	hasExternalProxy := ok && len(externalProxies) > 0
+	if !hasExternalProxy {
 		externalProxies = []any{map[string]any{
 			"forceTls": "same",
-			"dest":     host,
+			"dest":     defaultDest,
 			"port":     float64(inbound.Port),
 			"remark":   "",
 		}}
@@ -134,7 +156,7 @@ func (s *SubClashService) getProxies(inbound *model.Inbound, client model.Client
 		workingInbound := *inbound
 		workingInbound.Listen = extPrxy["dest"].(string)
 		workingInbound.Port = int(extPrxy["port"].(float64))
-		workingStream := cloneMap(stream)
+		workingStream := cloneStreamForExternalProxy(stream)
 
 		switch extPrxy["forceTls"].(string) {
 		case "tls":
@@ -149,6 +171,10 @@ func (s *SubClashService) getProxies(inbound *model.Inbound, client model.Client
 				delete(workingStream, "realitySettings")
 			}
 		}
+		security, _ := workingStream["security"].(string)
+		if hasExternalProxy {
+			applyExternalProxyTLSToStream(extPrxy, workingStream, security)
+		}
 
 		proxy := s.buildProxy(&workingInbound, client, workingStream, extPrxy["remark"].(string))
 		if len(proxy) > 0 {
@@ -159,6 +185,12 @@ func (s *SubClashService) getProxies(inbound *model.Inbound, client model.Client
 }
 
 func (s *SubClashService) buildProxy(inbound *model.Inbound, client model.Client, stream map[string]any, extraRemark string) map[string]any {
+	// Hysteria has its own transport + TLS model, applyTransport /
+	// applySecurity don't fit.
+	if inbound.Protocol == model.Hysteria {
+		return s.buildHysteriaProxy(inbound, client, extraRemark)
+	}
+
 	proxy := map[string]any{
 		"name":   s.SubService.genRemark(inbound, client.Email, extraRemark),
 		"server": inbound.Listen,
@@ -222,6 +254,88 @@ func (s *SubClashService) buildProxy(inbound *model.Inbound, client model.Client
 	return proxy
 }
 
+// buildHysteriaProxy produces a mihomo-compatible Clash entry for a
+// Hysteria (v1) or Hysteria2 inbound. It reads `inbound.StreamSettings`
+// directly instead of going through streamData/tlsData, because those
+// helpers prune fields (like `allowInsecure` / the salamander obfs
+// block) that the hysteria proxy wants preserved.
+func (s *SubClashService) buildHysteriaProxy(inbound *model.Inbound, client model.Client, extraRemark string) map[string]any {
+	var inboundSettings map[string]any
+	_ = json.Unmarshal([]byte(inbound.Settings), &inboundSettings)
+
+	proxyType := "hysteria2"
+	authKey := "password"
+	if v, ok := inboundSettings["version"].(float64); ok && int(v) == 1 {
+		proxyType = "hysteria"
+		authKey = "auth-str"
+	}
+
+	proxy := map[string]any{
+		"name":   s.SubService.genRemark(inbound, client.Email, extraRemark),
+		"type":   proxyType,
+		"server": inbound.Listen,
+		"port":   inbound.Port,
+		"udp":    true,
+		authKey:  client.Auth,
+	}
+
+	var rawStream map[string]any
+	_ = json.Unmarshal([]byte(inbound.StreamSettings), &rawStream)
+
+	// TLS details — hysteria always uses TLS.
+	if tlsSettings, ok := rawStream["tlsSettings"].(map[string]any); ok {
+		if serverName, ok := tlsSettings["serverName"].(string); ok && serverName != "" {
+			proxy["sni"] = serverName
+		}
+		if alpnList, ok := tlsSettings["alpn"].([]any); ok && len(alpnList) > 0 {
+			out := make([]string, 0, len(alpnList))
+			for _, a := range alpnList {
+				if s, ok := a.(string); ok && s != "" {
+					out = append(out, s)
+				}
+			}
+			if len(out) > 0 {
+				proxy["alpn"] = out
+			}
+		}
+		if inner, ok := tlsSettings["settings"].(map[string]any); ok {
+			if insecure, ok := inner["allowInsecure"].(bool); ok && insecure {
+				proxy["skip-cert-verify"] = true
+			}
+			if fp, ok := inner["fingerprint"].(string); ok && fp != "" {
+				proxy["client-fingerprint"] = fp
+			}
+		}
+	}
+
+	// Salamander obfs (Hysteria2). Read the same finalmask.udp[salamander]
+	// block the subscription link generator uses.
+	if finalmask, ok := rawStream["finalmask"].(map[string]any); ok {
+		if udpMasks, ok := finalmask["udp"].([]any); ok {
+			for _, m := range udpMasks {
+				mask, _ := m.(map[string]any)
+				if mask == nil || mask["type"] != "salamander" {
+					continue
+				}
+				settings, _ := mask["settings"].(map[string]any)
+				if pw, ok := settings["password"].(string); ok && pw != "" {
+					proxy["obfs"] = "salamander"
+					proxy["obfs-password"] = pw
+					break
+				}
+			}
+		}
+	}
+
+	// UDP port hopping. mihomo reads the range from a dedicated `ports`
+	// field (the base `port` stays as the redirect target).
+	if hopPorts := hysteriaHopPorts(rawStream); hopPorts != "" {
+		proxy["ports"] = hopPorts
+	}
+
+	return proxy
+}
+
 func (s *SubClashService) applyTransport(proxy map[string]any, network string, stream map[string]any) bool {
 	switch network {
 	case "", "tcp":
@@ -272,6 +386,53 @@ func (s *SubClashService) applyTransport(proxy map[string]any, network string, s
 			proxy["grpc-opts"] = grpcOpts
 		}
 		return true
+	case "httpupgrade":
+		proxy["network"] = "httpupgrade"
+		hu, _ := stream["httpupgradeSettings"].(map[string]any)
+		opts := map[string]any{}
+		if hu != nil {
+			if path, ok := hu["path"].(string); ok && path != "" {
+				opts["path"] = path
+			}
+			host := ""
+			if v, ok := hu["host"].(string); ok && v != "" {
+				host = v
+			} else if headers, ok := hu["headers"].(map[string]any); ok {
+				host = searchHost(headers)
+			}
+			if host != "" {
+				opts["headers"] = map[string]any{"Host": host}
+			}
+		}
+		if len(opts) > 0 {
+			proxy["http-upgrade-opts"] = opts
+		}
+		return true
+	case "xhttp":
+		proxy["network"] = "xhttp"
+		xhttp, _ := stream["xhttpSettings"].(map[string]any)
+		opts := map[string]any{}
+		if xhttp != nil {
+			if path, ok := xhttp["path"].(string); ok && path != "" {
+				opts["path"] = path
+			}
+			host := ""
+			if v, ok := xhttp["host"].(string); ok && v != "" {
+				host = v
+			} else if headers, ok := xhttp["headers"].(map[string]any); ok {
+				host = searchHost(headers)
+			}
+			if host != "" {
+				opts["host"] = host
+			}
+			if mode, ok := xhttp["mode"].(string); ok && mode != "" {
+				opts["mode"] = mode
+			}
+		}
+		if len(opts) > 0 {
+			proxy["xhttp-opts"] = opts
+		}
+		return true
 	default:
 		return false
 	}
@@ -295,6 +456,17 @@ func (s *SubClashService) applySecurity(proxy map[string]any, security string, s
 			}
 			if fingerprint, ok := tlsSettings["fingerprint"].(string); ok && fingerprint != "" {
 				proxy["client-fingerprint"] = fingerprint
+			}
+			if alpn, ok := externalProxyALPNList(tlsSettings["alpn"]); ok {
+				out := make([]string, 0, len(alpn))
+				for _, item := range alpn {
+					if s, ok := item.(string); ok && s != "" {
+						out = append(out, s)
+					}
+				}
+				if len(out) > 0 {
+					proxy["alpn"] = out
+				}
 			}
 		}
 		return true
@@ -352,6 +524,9 @@ func (s *SubClashService) tlsData(tData map[string]any) map[string]any {
 	if fingerprint, ok := tlsClientSettings["fingerprint"].(string); ok {
 		tlsData["fingerprint"] = fingerprint
 	}
+	if pins, ok := tlsClientSettings["pinnedPeerCertSha256"].([]any); ok && len(pins) > 0 {
+		tlsData["pin-sha256"] = pins
+	}
 	return tlsData
 }
 
@@ -378,8 +553,99 @@ func cloneMap(src map[string]any) map[string]any {
 		return nil
 	}
 	dst := make(map[string]any, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
+	maps.Copy(dst, src)
 	return dst
+}
+
+func mergeClashRulesYAML(base map[string]any, raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+
+	var custom any
+	if err := yaml.Unmarshal([]byte(raw), &custom); err != nil {
+		mergeClashRules(base, linesToClashRules(raw))
+		return nil
+	}
+
+	switch typed := custom.(type) {
+	case []any:
+		mergeClashRules(base, typed)
+	case map[string]any:
+		if rules, ok := typed["rules"]; ok {
+			if ruleList, ok := asAnySlice(rules); ok {
+				mergeClashRules(base, ruleList)
+			}
+		}
+	default:
+		mergeClashRules(base, linesToClashRules(raw))
+	}
+
+	return nil
+}
+
+func mergeClashRules(base map[string]any, customRules []any) {
+	if len(customRules) == 0 {
+		return
+	}
+
+	baseRules, _ := asAnySlice(base["rules"])
+	if hasClashMatchRule(customRules) {
+		base["rules"] = customRules
+		return
+	}
+
+	merged := make([]any, 0, len(customRules)+len(baseRules))
+	merged = append(merged, customRules...)
+	merged = append(merged, baseRules...)
+	base["rules"] = merged
+}
+
+func asAnySlice(value any) ([]any, bool) {
+	switch typed := value.(type) {
+	case []any:
+		return typed, true
+	case []string:
+		out := make([]any, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, item)
+		}
+		return out, true
+	case []map[string]any:
+		out := make([]any, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, item)
+		}
+		return out, true
+	default:
+		return nil, false
+	}
+}
+
+func hasClashMatchRule(rules []any) bool {
+	for _, rule := range rules {
+		ruleText, ok := rule.(string)
+		if !ok {
+			continue
+		}
+		parts := strings.SplitN(ruleText, ",", 2)
+		if strings.EqualFold(strings.TrimSpace(parts[0]), "MATCH") {
+			return true
+		}
+	}
+	return false
+}
+
+func linesToClashRules(raw string) []any {
+	lines := strings.Split(raw, "\n")
+	rules := make([]any, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		rules = append(rules, line)
+	}
+	return rules
 }

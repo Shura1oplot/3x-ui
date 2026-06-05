@@ -13,10 +13,10 @@ import (
 	"sort"
 	"time"
 
-	"github.com/mhsanaei/3x-ui/v2/database"
-	"github.com/mhsanaei/3x-ui/v2/database/model"
-	"github.com/mhsanaei/3x-ui/v2/logger"
-	"github.com/mhsanaei/3x-ui/v2/xray"
+	"github.com/mhsanaei/3x-ui/v3/database"
+	"github.com/mhsanaei/3x-ui/v3/database/model"
+	"github.com/mhsanaei/3x-ui/v3/logger"
+	"github.com/mhsanaei/3x-ui/v3/xray"
 )
 
 // IPWithTimestamp tracks an IP address with its last seen timestamp
@@ -35,6 +35,8 @@ var job *CheckClientIpJob
 
 const defaultXrayAPIPort = 62789
 
+const ipStaleAfterSeconds = int64(30 * 60)
+
 // NewCheckClientIpJob creates a new client IP monitoring job instance.
 func NewCheckClientIpJob() *CheckClientIpJob {
 	job = new(CheckClientIpJob)
@@ -47,26 +49,21 @@ func (j *CheckClientIpJob) Run() {
 	}
 
 	shouldClearAccessLog := false
-	iplimitActive := j.hasLimitIp()
-	f2bInstalled := j.checkFail2BanInstalled()
-	isAccessLogAvailable := j.checkAccessLogAvailable(iplimitActive)
+	fail2BanEnabled := isFail2BanEnabled()
+	hasLimit := fail2BanEnabled && j.hasLimitIp()
+	f2bInstalled := false
+	if hasLimit {
+		f2bInstalled = j.checkFail2BanInstalled()
+	}
+	isAccessLogAvailable := j.checkAccessLogAvailable(hasLimit)
 
-	if isAccessLogAvailable {
-		if runtime.GOOS == "windows" {
-			if iplimitActive {
-				shouldClearAccessLog = j.processLogFile()
-			}
-		} else {
-			if iplimitActive {
-				if f2bInstalled {
-					shouldClearAccessLog = j.processLogFile()
-				} else {
-					if !f2bInstalled {
-						logger.Warning("[LimitIP] Fail2Ban is not installed, Please install Fail2Ban from the x-ui bash menu.")
-					}
-				}
-			}
+	if fail2BanEnabled && isAccessLogAvailable {
+		enforce := hasLimit
+		if hasLimit && runtime.GOOS != "windows" && !f2bInstalled {
+			logger.Warning("[LimitIP] Fail2Ban is not installed, Please install Fail2Ban from the x-ui bash menu.")
+			enforce = false
 		}
+		shouldClearAccessLog = j.processLogFile(enforce)
 	}
 
 	if shouldClearAccessLog || (isAccessLogAvailable && time.Now().Unix()-j.lastClear > 3600) {
@@ -124,7 +121,7 @@ func (j *CheckClientIpJob) hasLimitIp() bool {
 	return false
 }
 
-func (j *CheckClientIpJob) processLogFile() bool {
+func (j *CheckClientIpJob) processLogFile(enforce bool) bool {
 
 	ipRegex := regexp.MustCompile(`from (?:tcp:|udp:)?\[?([0-9a-fA-F\.:]+)\]?:\d+ accepted`)
 	emailRegex := regexp.MustCompile(`email: (.+)$`)
@@ -162,7 +159,7 @@ func (j *CheckClientIpJob) processLogFile() bool {
 		var timestamp int64
 		timestampMatches := timestampRegex.FindStringSubmatch(line)
 		if len(timestampMatches) >= 2 {
-			t, err := time.Parse("2006/01/02 15:04:05", timestampMatches[1])
+			t, err := time.ParseInLocation("2006/01/02 15:04:05", timestampMatches[1], time.Local)
 			if err == nil {
 				timestamp = t.Unix()
 			} else {
@@ -180,6 +177,9 @@ func (j *CheckClientIpJob) processLogFile() bool {
 			inboundClientIps[email][ip] = timestamp
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		j.checkError(err)
+	}
 
 	shouldCleanLog := false
 	for email, ipTimestamps := range inboundClientIps {
@@ -196,17 +196,61 @@ func (j *CheckClientIpJob) processLogFile() bool {
 			continue
 		}
 
-		shouldCleanLog = j.updateInboundClientIps(clientIpsRecord, email, ipsWithTime) || shouldCleanLog
+		shouldCleanLog = j.updateInboundClientIps(clientIpsRecord, email, ipsWithTime, enforce) || shouldCleanLog
 	}
 
 	return shouldCleanLog
 }
 
+func mergeClientIps(old, new []IPWithTimestamp, staleCutoff int64) map[string]int64 {
+	ipMap := make(map[string]int64, len(old)+len(new))
+	for _, ipTime := range old {
+		if ipTime.Timestamp < staleCutoff {
+			continue
+		}
+		ipMap[ipTime.IP] = ipTime.Timestamp
+	}
+	for _, ipTime := range new {
+		if ipTime.Timestamp < staleCutoff {
+			continue
+		}
+		if existingTime, ok := ipMap[ipTime.IP]; !ok || ipTime.Timestamp > existingTime {
+			ipMap[ipTime.IP] = ipTime.Timestamp
+		}
+	}
+	return ipMap
+}
+
+func partitionLiveIps(ipMap map[string]int64, observedThisScan map[string]bool) (live, historical []IPWithTimestamp) {
+	live = make([]IPWithTimestamp, 0, len(observedThisScan))
+	historical = make([]IPWithTimestamp, 0, len(ipMap))
+	for ip, ts := range ipMap {
+		entry := IPWithTimestamp{IP: ip, Timestamp: ts}
+		if observedThisScan[ip] {
+			live = append(live, entry)
+		} else {
+			historical = append(historical, entry)
+		}
+	}
+	sort.Slice(live, func(i, j int) bool { return live[i].Timestamp < live[j].Timestamp })
+	sort.Slice(historical, func(i, j int) bool { return historical[i].Timestamp < historical[j].Timestamp })
+	return live, historical
+}
+
 func (j *CheckClientIpJob) checkFail2BanInstalled() bool {
+	if !isFail2BanEnabled() {
+		return false
+	}
+
 	cmd := "fail2ban-client"
 	args := []string{"-h"}
 	err := exec.Command(cmd, args...).Run()
 	return err == nil
+}
+
+func isFail2BanEnabled() bool {
+	value, ok := os.LookupEnv("XUI_ENABLE_FAIL2BAN")
+	return !ok || value == "true"
 }
 
 func (j *CheckClientIpJob) checkAccessLogAvailable(iplimitActive bool) bool {
@@ -267,7 +311,7 @@ func (j *CheckClientIpJob) addInboundClientIps(clientEmail string, ipsWithTime [
 	return nil
 }
 
-func (j *CheckClientIpJob) updateInboundClientIps(inboundClientIps *model.InboundClientIps, clientEmail string, newIpsWithTime []IPWithTimestamp) bool {
+func (j *CheckClientIpJob) updateInboundClientIps(inboundClientIps *model.InboundClientIps, clientEmail string, newIpsWithTime []IPWithTimestamp, enforce bool) bool {
 	// Get the inbound configuration
 	inbound, err := j.getInboundByEmail(clientEmail)
 	if err != nil {
@@ -295,8 +339,9 @@ func (j *CheckClientIpJob) updateInboundClientIps(inboundClientIps *model.Inboun
 		}
 	}
 
-	if !clientFound || limitIp <= 0 || !inbound.Enable {
-		// No limit or inbound disabled, just update and return
+	if !enforce || !clientFound || limitIp <= 0 || !inbound.Enable {
+		// Nothing to enforce (collection-only run, no limit, client missing, or
+		// inbound disabled): record the observed IPs for the panel and return.
 		jsonIps, _ := json.Marshal(newIpsWithTime)
 		inboundClientIps.Ips = string(jsonIps)
 		db := database.GetDB()
@@ -310,68 +355,60 @@ func (j *CheckClientIpJob) updateInboundClientIps(inboundClientIps *model.Inboun
 		json.Unmarshal([]byte(inboundClientIps.Ips), &oldIpsWithTime)
 	}
 
-	// Merge old and new IPs, keeping the latest timestamp for each IP
-	ipMap := make(map[string]int64)
-	for _, ipTime := range oldIpsWithTime {
-		ipMap[ipTime.IP] = ipTime.Timestamp
-	}
-	for _, ipTime := range newIpsWithTime {
-		if existingTime, ok := ipMap[ipTime.IP]; !ok || ipTime.Timestamp > existingTime {
-			ipMap[ipTime.IP] = ipTime.Timestamp
-		}
-	}
+	ipMap := mergeClientIps(oldIpsWithTime, newIpsWithTime, time.Now().Unix()-ipStaleAfterSeconds)
 
-	// Convert back to slice and sort by timestamp (oldest first)
-	// This ensures we always protect the original/current connections and ban new excess ones.
-	allIps := make([]IPWithTimestamp, 0, len(ipMap))
-	for ip, timestamp := range ipMap {
-		allIps = append(allIps, IPWithTimestamp{IP: ip, Timestamp: timestamp})
+	// only ips seen in this scan count toward the limit. see
+	// partitionLiveIps.
+	observedThisScan := make(map[string]bool, len(newIpsWithTime))
+	for _, ipTime := range newIpsWithTime {
+		observedThisScan[ipTime.IP] = true
 	}
-	sort.Slice(allIps, func(i, j int) bool {
-		return allIps[i].Timestamp < allIps[j].Timestamp // Ascending order (oldest first)
-	})
+	liveIps, historicalIps := partitionLiveIps(ipMap, observedThisScan)
 
 	shouldCleanLog := false
 	j.disAllowedIps = []string{}
 
-	// Open log file
-	logIpFile, err := os.OpenFile(xray.GetIPLimitLogPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		logger.Errorf("failed to open IP limit log file: %s", err)
-		return false
-	}
-	defer logIpFile.Close()
-	log.SetOutput(logIpFile)
-	log.SetFlags(log.LstdFlags)
-
-	// Check if we exceed the limit
-	if len(allIps) > limitIp {
+	// historical db-only ips are excluded from this count on purpose.
+	var keptLive []IPWithTimestamp
+	if len(liveIps) > limitIp {
 		shouldCleanLog = true
 
-		// Keep the oldest IPs (currently active connections) and ban the new excess ones.
-		keptIps := allIps[:limitIp]
-		bannedIps := allIps[limitIp:]
+		// keep the newest live ips, ban older ones.
+		cutoff := len(liveIps) - limitIp
+		keptLive = liveIps[cutoff:]
+		bannedLive := liveIps[:cutoff]
 
-		// Log banned IPs in the format fail2ban filters expect: [LIMIT_IP] Email = X || Disconnecting OLD IP = Y || Timestamp = Z
-		for _, ipTime := range bannedIps {
+		logIpFile, err := os.OpenFile(xray.GetIPLimitLogPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			logger.Errorf("failed to open IP limit log file: %s", err)
+			return false
+		}
+		defer logIpFile.Close()
+		ipLogger := log.New(logIpFile, "", log.LstdFlags)
+
+		// log format is load-bearing: x-ui.sh create_iplimit_jails builds
+		// filter.d/3x-ipl.conf with
+		//   failregex = \[LIMIT_IP\]\s*Email\s*=\s*<F-USER>.+</F-USER>\s*\|\|\s*Disconnecting OLD IP\s*=\s*<ADDR>\s*\|\|\s*Timestamp\s*=\s*\d+
+		// don't change the wording.
+		for _, ipTime := range bannedLive {
 			j.disAllowedIps = append(j.disAllowedIps, ipTime.IP)
-			log.Printf("[LIMIT_IP] Email = %s || Disconnecting OLD IP = %s || Timestamp = %d", clientEmail, ipTime.IP, ipTime.Timestamp)
+			ipLogger.Printf("[LIMIT_IP] Email = %s || Disconnecting OLD IP = %s || Timestamp = %d", clientEmail, ipTime.IP, ipTime.Timestamp)
 		}
 
-		// Actually disconnect banned IPs by temporarily removing and re-adding user
-		// This forces Xray to drop existing connections from banned IPs
-		if len(bannedIps) > 0 {
-			j.disconnectClientTemporarily(inbound, clientEmail, clients)
-		}
-
-		// Update database with only the currently active (kept) IPs
-		jsonIps, _ := json.Marshal(keptIps)
-		inboundClientIps.Ips = string(jsonIps)
+		// force xray to drop existing connections from banned ips
+		j.disconnectClientTemporarily(inbound, clientEmail, clients)
 	} else {
-		// Under limit, save all IPs
-		jsonIps, _ := json.Marshal(allIps)
-		inboundClientIps.Ips = string(jsonIps)
+		keptLive = liveIps
 	}
+
+	// keep kept-live + historical in the blob so the panel keeps showing
+	// recently seen ips. banned live ips are already in the fail2ban log
+	// and will reappear in the next scan if they reconnect.
+	dbIps := make([]IPWithTimestamp, 0, len(keptLive)+len(historicalIps))
+	dbIps = append(dbIps, keptLive...)
+	dbIps = append(dbIps, historicalIps...)
+	jsonIps, _ := json.Marshal(dbIps)
+	inboundClientIps.Ips = string(jsonIps)
 
 	db := database.GetDB()
 	err = db.Save(inboundClientIps).Error
@@ -381,7 +418,7 @@ func (j *CheckClientIpJob) updateInboundClientIps(inboundClientIps *model.Inboun
 	}
 
 	if len(j.disAllowedIps) > 0 {
-		logger.Infof("[LIMIT_IP] Client %s: Kept %d current IPs, queued %d new IPs for fail2ban", clientEmail, limitIp, len(j.disAllowedIps))
+		logger.Infof("[LIMIT_IP] Client %s: Kept %d live IPs, queued %d old IPs for fail2ban", clientEmail, len(keptLive), len(j.disAllowedIps))
 	}
 
 	return shouldCleanLog

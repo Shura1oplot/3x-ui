@@ -3,8 +3,8 @@ package controller
 import (
 	"encoding/json"
 
-	"github.com/mhsanaei/3x-ui/v2/util/common"
-	"github.com/mhsanaei/3x-ui/v2/web/service"
+	"github.com/mhsanaei/3x-ui/v3/util/common"
+	"github.com/mhsanaei/3x-ui/v3/web/service"
 
 	"github.com/gin-gonic/gin"
 )
@@ -49,19 +49,41 @@ func (a *XraySettingController) getXraySetting(c *gin.Context) {
 		jsonMsg(c, I18nWeb(c, "pages.settings.toasts.getSettings"), err)
 		return
 	}
+	// Older versions of this handler embedded the raw DB value as
+	// `xraySetting` in the response without checking if the value
+	// already had that wrapper shape. When the frontend saved it
+	// back through the textarea verbatim, the wrapper got persisted
+	// and every subsequent save nested another layer, which is what
+	// eventually produced the blank Xray Settings page in #4059.
+	// Strip any such wrapper here, and heal the DB if we found one so
+	// the next read is O(1) instead of climbing the same pile again.
+	if unwrapped := service.UnwrapXrayTemplateConfig(xraySetting); unwrapped != xraySetting {
+		if saveErr := a.XraySettingService.SaveXraySetting(unwrapped); saveErr == nil {
+			xraySetting = unwrapped
+		} else {
+			// Don't fail the read — just serve the unwrapped value
+			// and leave the DB healing for a later save.
+			xraySetting = unwrapped
+		}
+	}
 	inboundTags, err := a.InboundService.GetInboundTags()
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.settings.toasts.getSettings"), err)
 		return
 	}
+	clientReverseTags, err := a.InboundService.GetClientReverseTags()
+	if err != nil {
+		clientReverseTags = "[]"
+	}
 	outboundTestUrl, _ := a.SettingService.GetXrayOutboundTestUrl()
 	if outboundTestUrl == "" {
 		outboundTestUrl = "https://www.google.com/generate_204"
 	}
-	xrayResponse := map[string]interface{}{
-		"xraySetting":     json.RawMessage(xraySetting),
-		"inboundTags":     json.RawMessage(inboundTags),
-		"outboundTestUrl": outboundTestUrl,
+	xrayResponse := map[string]any{
+		"xraySetting":       json.RawMessage(xraySetting),
+		"inboundTags":       json.RawMessage(inboundTags),
+		"clientReverseTags": json.RawMessage(clientReverseTags),
+		"outboundTestUrl":   outboundTestUrl,
 	}
 	result, err := json.Marshal(xrayResponse)
 	if err != nil {
@@ -82,7 +104,10 @@ func (a *XraySettingController) updateSetting(c *gin.Context) {
 	if outboundTestUrl == "" {
 		outboundTestUrl = "https://www.google.com/generate_204"
 	}
-	_ = a.SettingService.SetXrayOutboundTestUrl(outboundTestUrl)
+	if err := a.SettingService.SetXrayOutboundTestUrl(outboundTestUrl); err != nil {
+		jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifySettings"), err)
+		return
+	}
 	jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifySettings"), nil)
 }
 
@@ -174,9 +199,12 @@ func (a *XraySettingController) resetOutboundsTraffic(c *gin.Context) {
 
 // testOutbound tests an outbound configuration and returns the delay/response time.
 // Optional form "allOutbounds": JSON array of all outbounds; used to resolve sockopt.dialerProxy dependencies.
+// Optional form "mode": "tcp" for a fast dial-only probe (parallel-safe),
+// anything else (default) for a full HTTP probe through a temp xray instance.
 func (a *XraySettingController) testOutbound(c *gin.Context) {
 	outboundJSON := c.PostForm("outbound")
 	allOutboundsJSON := c.PostForm("allOutbounds")
+	mode := c.PostForm("mode")
 
 	if outboundJSON == "" {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), common.NewError("outbound parameter is required"))
@@ -185,8 +213,13 @@ func (a *XraySettingController) testOutbound(c *gin.Context) {
 
 	// Load the test URL from server settings to prevent SSRF via user-controlled URLs
 	testURL, _ := a.SettingService.GetXrayOutboundTestUrl()
+	testURL, err := service.SanitizePublicHTTPURL(testURL, false)
+	if err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
 
-	result, err := a.OutboundService.TestOutbound(outboundJSON, testURL, allOutboundsJSON)
+	result, err := a.OutboundService.TestOutbound(outboundJSON, testURL, allOutboundsJSON, mode)
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
