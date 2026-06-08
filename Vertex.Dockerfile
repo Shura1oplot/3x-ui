@@ -31,7 +31,6 @@ RUN apt-get update \
       unzip \
       curl
 
-
 COPY . .
 
 COPY --from=frontend /src/web/dist ./web/dist

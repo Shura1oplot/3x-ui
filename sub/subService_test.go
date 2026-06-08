@@ -61,6 +61,25 @@ func TestIsRoutableHost(t *testing.T) {
 	}
 }
 
+func TestListenIsInternalOnly(t *testing.T) {
+	// Reachable only from the same host -> a fallback child here must be
+	// projected through its master.
+	internalOnly := []string{"127.0.0.1", "127.0.0.2", "::1", "[::1]", "@fallback", "/run/x.sock"}
+	for _, v := range internalOnly {
+		if !listenIsInternalOnly(v) {
+			t.Fatalf("listenIsInternalOnly(%q) = false, want true", v)
+		}
+	}
+	// Directly reachable on its own port -> never projected, even if a stale
+	// fallback rule names it as a child (#4987).
+	reachable := []string{"", "0.0.0.0", "::", "::0", "1.2.3.4", "10.0.0.5", "192.168.1.10", "vpn.example.com"}
+	for _, v := range reachable {
+		if listenIsInternalOnly(v) {
+			t.Fatalf("listenIsInternalOnly(%q) = true, want false", v)
+		}
+	}
+}
+
 func TestResolveInboundAddress(t *testing.T) {
 	const reqHost = "sub.example.com"
 
@@ -573,6 +592,47 @@ func TestApplyExternalProxyTLSParams_ExplicitSNIOverridesUpstream(t *testing.T) 
 	if params["sni"] != "edge.example.com" {
 		t.Fatalf("sni = %q, want edge.example.com", params["sni"])
 	}
+}
+
+func TestApplyExternalProxy_ECHPropagates(t *testing.T) {
+	const ech = "ech-config-base64"
+
+	t.Run("url params", func(t *testing.T) {
+		params := map[string]string{"security": "tls"}
+		ep := map[string]any{"dest": "proxy.example.com", "echConfigList": ech}
+		applyExternalProxyTLSParams(ep, params, "tls")
+		if params["ech"] != ech {
+			t.Fatalf("ech param = %q, want %q", params["ech"], ech)
+		}
+	})
+
+	t.Run("vmess obj", func(t *testing.T) {
+		obj := map[string]any{}
+		ep := map[string]any{"dest": "proxy.example.com", "echConfigList": ech}
+		applyExternalProxyTLSObj(ep, obj, "tls")
+		if obj["ech"] != ech {
+			t.Fatalf("ech obj = %v, want %q", obj["ech"], ech)
+		}
+	})
+
+	t.Run("json stream settings", func(t *testing.T) {
+		stream := map[string]any{"security": "tls", "tlsSettings": map[string]any{}}
+		ep := map[string]any{"dest": "proxy.example.com", "echConfigList": ech}
+		applyExternalProxyTLSToStream(ep, stream, "tls")
+		settings, _ := stream["tlsSettings"].(map[string]any)["settings"].(map[string]any)
+		if settings["echConfigList"] != ech {
+			t.Fatalf("echConfigList = %v, want %q", settings["echConfigList"], ech)
+		}
+	})
+
+	t.Run("non-tls security drops ech", func(t *testing.T) {
+		params := map[string]string{}
+		ep := map[string]any{"echConfigList": ech}
+		applyExternalProxyTLSParams(ep, params, "none")
+		if _, ok := params["ech"]; ok {
+			t.Fatalf("ech must not be set when security != tls")
+		}
+	})
 }
 
 func TestApplyExternalProxyTLSToStream_DoesNotLeakAcrossProxies(t *testing.T) {
