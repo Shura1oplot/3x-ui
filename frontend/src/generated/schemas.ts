@@ -94,8 +94,8 @@ export const SCHEMAS: Record<string, unknown> = {
         "minimum": 0,
         "type": "integer"
       },
-      "panelProxy": {
-        "description": "Proxy URL for the panel's own outbound requests (GitHub/Telegram)",
+      "panelOutbound": {
+        "description": "Xray outbound tag for the panel's own outbound HTTP (update checks/downloads, Telegram, geo updates, outbound-subscription fetches)",
         "type": "string"
       },
       "remarkModel": {
@@ -217,6 +217,10 @@ export const SCHEMAS: Record<string, unknown> = {
         "description": "Subscription support URL",
         "type": "string"
       },
+      "subThemeDir": {
+        "description": "Absolute path to a folder containing a custom subscription page template",
+        "type": "string"
+      },
       "subTitle": {
         "description": "Subscription title",
         "type": "string"
@@ -295,6 +299,11 @@ export const SCHEMAS: Record<string, unknown> = {
         "description": "Two-factor authentication token",
         "type": "string"
       },
+      "warpUpdateInterval": {
+        "description": "WARP",
+        "minimum": 0,
+        "type": "integer"
+      },
       "webBasePath": {
         "description": "Base path for web panel URLs",
         "type": "string"
@@ -348,7 +357,7 @@ export const SCHEMAS: Record<string, unknown> = {
       "ldapUserFilter",
       "ldapVlessField",
       "pageSize",
-      "panelProxy",
+      "panelOutbound",
       "remarkModel",
       "restartXrayOnClientDisable",
       "sessionMaxAge",
@@ -378,6 +387,7 @@ export const SCHEMAS: Record<string, unknown> = {
       "subRoutingRules",
       "subShowInfo",
       "subSupportUrl",
+      "subThemeDir",
       "subTitle",
       "subURI",
       "subUpdates",
@@ -396,6 +406,7 @@ export const SCHEMAS: Record<string, unknown> = {
       "trustedProxyCIDRs",
       "twoFactorEnable",
       "twoFactorToken",
+      "warpUpdateInterval",
       "webBasePath",
       "webCertFile",
       "webDomain",
@@ -517,8 +528,8 @@ export const SCHEMAS: Record<string, unknown> = {
         "minimum": 0,
         "type": "integer"
       },
-      "panelProxy": {
-        "description": "Proxy URL for the panel's own outbound requests (GitHub/Telegram)",
+      "panelOutbound": {
+        "description": "Xray outbound tag for the panel's own outbound HTTP (update checks/downloads, Telegram, geo updates, outbound-subscription fetches)",
         "type": "string"
       },
       "remarkModel": {
@@ -640,6 +651,10 @@ export const SCHEMAS: Record<string, unknown> = {
         "description": "Subscription support URL",
         "type": "string"
       },
+      "subThemeDir": {
+        "description": "Absolute path to a folder containing a custom subscription page template",
+        "type": "string"
+      },
       "subTitle": {
         "description": "Subscription title",
         "type": "string"
@@ -718,6 +733,11 @@ export const SCHEMAS: Record<string, unknown> = {
         "description": "Two-factor authentication token",
         "type": "string"
       },
+      "warpUpdateInterval": {
+        "description": "WARP",
+        "minimum": 0,
+        "type": "integer"
+      },
       "webBasePath": {
         "description": "Base path for web panel URLs",
         "type": "string"
@@ -777,7 +797,7 @@ export const SCHEMAS: Record<string, unknown> = {
       "ldapUserFilter",
       "ldapVlessField",
       "pageSize",
-      "panelProxy",
+      "panelOutbound",
       "remarkModel",
       "restartXrayOnClientDisable",
       "sessionMaxAge",
@@ -807,6 +827,7 @@ export const SCHEMAS: Record<string, unknown> = {
       "subRoutingRules",
       "subShowInfo",
       "subSupportUrl",
+      "subThemeDir",
       "subTitle",
       "subURI",
       "subUpdates",
@@ -825,6 +846,7 @@ export const SCHEMAS: Record<string, unknown> = {
       "trustedProxyCIDRs",
       "twoFactorEnable",
       "twoFactorToken",
+      "warpUpdateInterval",
       "webBasePath",
       "webCertFile",
       "webDomain",
@@ -1171,49 +1193,6 @@ export const SCHEMAS: Record<string, unknown> = {
     ],
     "type": "object"
   },
-  "CustomGeoResource": {
-    "properties": {
-      "alias": {
-        "type": "string"
-      },
-      "createdAt": {
-        "type": "integer"
-      },
-      "id": {
-        "type": "integer"
-      },
-      "lastModified": {
-        "type": "string"
-      },
-      "lastUpdatedAt": {
-        "type": "integer"
-      },
-      "localPath": {
-        "type": "string"
-      },
-      "type": {
-        "type": "string"
-      },
-      "updatedAt": {
-        "type": "integer"
-      },
-      "url": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "alias",
-      "createdAt",
-      "id",
-      "lastModified",
-      "lastUpdatedAt",
-      "localPath",
-      "type",
-      "updatedAt",
-      "url"
-    ],
-    "type": "object"
-  },
   "FallbackParentInfo": {
     "description": "FallbackParentInfo carries everything the frontend needs to rewrite a\nchild inbound's client link: where to connect (the master's address\nand port) and which path matched on the master's fallbacks array.\nThe frontend already has the master inbound in its dbInbounds list,\nso we only ship identifiers + the match path here.",
     "properties": {
@@ -1315,7 +1294,8 @@ export const SCHEMAS: Record<string, unknown> = {
           "http",
           "mixed",
           "tunnel",
-          "tun"
+          "tun",
+          "mtproto"
         ],
         "example": "vless",
         "type": "string"
@@ -1326,8 +1306,25 @@ export const SCHEMAS: Record<string, unknown> = {
         "type": "string"
       },
       "settings": {},
+      "shareAddr": {
+        "type": "string"
+      },
+      "shareAddrStrategy": {
+        "enum": [
+          "node",
+          "listen",
+          "custom"
+        ],
+        "type": "string"
+      },
       "sniffing": {},
       "streamSettings": {},
+      "subSortIndex": {
+        "description": "1-based sort order of this inbound's links in subscription output only (lower first; ties by id)",
+        "example": 1,
+        "minimum": 1,
+        "type": "integer"
+      },
       "tag": {
         "example": "in-443-tcp",
         "type": "string"
@@ -1364,8 +1361,11 @@ export const SCHEMAS: Record<string, unknown> = {
       "protocol",
       "remark",
       "settings",
+      "shareAddr",
+      "shareAddrStrategy",
       "sniffing",
       "streamSettings",
+      "subSortIndex",
       "tag",
       "total",
       "trafficReset",
@@ -1438,6 +1438,11 @@ export const SCHEMAS: Record<string, unknown> = {
     "properties": {
       "id": {
         "example": 1,
+        "type": "integer"
+      },
+      "nodeId": {
+        "description": "Hosting node; nil for this panel's own inbounds. Lets the clients\npage map a node filter onto inbound IDs (#4997).",
+        "nullable": true,
         "type": "integer"
       },
       "port": {
@@ -1553,6 +1558,19 @@ export const SCHEMAS: Record<string, unknown> = {
         "example": 5,
         "type": "integer"
       },
+      "inboundSyncMode": {
+        "enum": [
+          "all",
+          "selected"
+        ],
+        "type": "string"
+      },
+      "inboundTags": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
       "lastError": {
         "type": "string"
       },
@@ -1629,6 +1647,13 @@ export const SCHEMAS: Record<string, unknown> = {
         "example": 86400,
         "type": "integer"
       },
+      "xrayError": {
+        "type": "string"
+      },
+      "xrayState": {
+        "description": "XrayState and XrayError are captured from the remote node's /panel/api/server/status\nduring heartbeats. They let the central panel distinguish \"panel API reachable\"\n(status=online) from \"Xray core itself has failed on the node\" for monitoring.",
+        "type": "string"
+      },
       "xrayVersion": {
         "example": "25.10.31",
         "type": "string"
@@ -1649,6 +1674,8 @@ export const SCHEMAS: Record<string, unknown> = {
       "guid",
       "id",
       "inboundCount",
+      "inboundSyncMode",
+      "inboundTags",
       "lastError",
       "lastHeartbeat",
       "latencyMs",
@@ -1664,6 +1691,8 @@ export const SCHEMAS: Record<string, unknown> = {
       "tlsVerifyMode",
       "updatedAt",
       "uptimeSecs",
+      "xrayError",
+      "xrayState",
       "xrayVersion"
     ],
     "type": "object"
@@ -1725,6 +1754,13 @@ export const SCHEMAS: Record<string, unknown> = {
         "example": 86400,
         "type": "integer"
       },
+      "xrayError": {
+        "type": "string"
+      },
+      "xrayState": {
+        "description": "XrayState/XrayError are populated on successful probes even when the node's\nXray core is not healthy. The UI uses them for a distinct \"panel ok, xray failed\" indicator.",
+        "type": "string"
+      },
       "xrayVersion": {
         "example": "25.10.31",
         "type": "string"
@@ -1738,6 +1774,8 @@ export const SCHEMAS: Record<string, unknown> = {
       "panelVersion",
       "status",
       "uptimeSecs",
+      "xrayError",
+      "xrayState",
       "xrayVersion"
     ],
     "type": "object"

@@ -122,7 +122,7 @@ export const sections: readonly Section[] = [
       {
         method: 'GET',
         path: '/panel/api/inbounds/options',
-        summary: 'Lightweight picker projection of the authenticated user’s inbounds. Returns id, remark, tag, protocol, port, a server-computed tlsFlowCapable flag (true for VLESS / port-fallback on TCP with tls or reality), and ssMethod (the Shadowsocks cipher, empty for non-Shadowsocks inbounds — used by the client UI to generate a valid Shadowsocks 2022 PSK). Use this for dropdowns and attach pickers — it skips settings, streamSettings, and clientStats so the payload stays small even on panels with thousands of clients.',
+        summary: 'Lightweight picker projection of the authenticated user’s inbounds. Returns id, remark, tag, protocol, port, a server-computed tlsFlowCapable flag (true for VLESS on TCP with tls or reality, or on XHTTP with VLESS encryption / vlessenc enabled), and ssMethod (the Shadowsocks cipher, empty for non-Shadowsocks inbounds — used by the client UI to generate a valid Shadowsocks 2022 PSK). Use this for dropdowns and attach pickers — it skips settings, streamSettings, and clientStats so the payload stays small even on panels with thousands of clients.',
         responseSchema: 'InboundOption',
         responseSchemaArray: true,
       },
@@ -204,6 +204,17 @@ export const sections: readonly Section[] = [
         params: [
           { name: 'data', in: 'body (form)', type: 'string', desc: 'JSON-encoded inbound payload.' },
         ],
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/inbounds/pushClientTraffics',
+        summary: 'Receive a master panel\'s aggregated per-client usage, keyed by the master\'s GUID. Stored in a side table used only for the UI display overlay and local quota enforcement — never folded into the local counters that masters poll, so delta accounting stays intact. Called panel-to-panel by the node traffic sync job.',
+        params: [
+          { name: 'masterGuid', in: 'body (json)', type: 'string', desc: 'Stable GUID of the pushing master panel.' },
+          { name: 'traffics', in: 'body (json)', type: 'object[]', desc: 'Client traffic rows; only email/up/down are read.' },
+        ],
+        body: '{\n  "masterGuid": "9f6c2d-…",\n  "traffics": [\n    { "email": "alice", "up": 1048576, "down": 2097152 }\n  ]\n}',
+        response: '{\n  "success": true\n}',
       },
       {
         method: 'GET',
@@ -441,6 +452,21 @@ export const sections: readonly Section[] = [
         ],
         body: 'sni=example.com',
         response: '{\n  "success": true,\n  "obj": {\n    "echKeySet": "...",\n    "echServerKeys": [...],\n    "echConfigList": "..."\n  }\n}',
+      },
+      {
+        method: 'GET',
+        path: '/panel/api/server/clientIps',
+        summary: 'Fetch the fully aggregated inbound_client_ips database table. Used by nodes to sync recently active IPs across the cluster.',
+        responseSchema: 'InboundClientIps',
+        responseSchemaArray: true,
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/server/clientIps',
+        summary: 'Submit a list of recently active IP timestamps. The panel merges them with the existing database to maintain a unified global IP-limit view.',
+        params: [
+          { name: 'ips', in: 'body (json)', type: 'object[]', desc: 'Array of InboundClientIps to merge.' },
+        ],
       },
     ],
   },
@@ -819,6 +845,13 @@ export const sections: readonly Section[] = [
       },
       {
         method: 'POST',
+        path: '/panel/api/nodes/inbounds',
+        summary: 'Use unsaved node connection details to list the remote inbounds available for selective import.',
+        body: '{\n  "name": "de-fra-1",\n  "scheme": "https",\n  "address": "node1.example.com",\n  "port": 2053,\n  "basePath": "/",\n  "apiToken": "abcdef..."\n}',
+        response: '{\n  "success": true,\n  "obj": [\n    { "tag": "inbound-443", "remark": "VLESS", "protocol": "vless", "port": 443 }\n  ]\n}',
+      },
+      {
+        method: 'POST',
         path: '/panel/api/nodes/probe/:id',
         summary: 'Probe an existing node, updating its cached health state.',
         params: [
@@ -841,61 +874,6 @@ export const sections: readonly Section[] = [
           { name: 'metric', in: 'path', type: 'string', desc: 'cpu | mem.' },
           { name: 'bucket', in: 'path', type: 'number', desc: 'Bucket size in seconds. Allowed: 2, 30, 60, 120, 180, 300.' },
         ],
-      },
-    ],
-  },
-
-  {
-    id: 'custom-geo',
-    title: 'Custom Geo',
-    description:
-      'Manage user-supplied GeoIP / GeoSite source files. All endpoints under /panel/api/custom-geo.',
-    endpoints: [
-      {
-        method: 'GET',
-        path: '/panel/api/custom-geo/list',
-        summary: 'List configured custom geo sources with their type, alias, URL, status, and last-download timestamp.',
-      },
-      {
-        method: 'GET',
-        path: '/panel/api/custom-geo/aliases',
-        summary: 'List geo aliases currently usable in routing rules — both built-in defaults and the user-configured ones.',
-      },
-      {
-        method: 'POST',
-        path: '/panel/api/custom-geo/add',
-        summary: 'Register a custom geo source. Alias is auto-normalised; URL must point to a .dat / .json blob.',
-        body:
-          '{\n  "type": "geoip",\n  "alias": "myips",\n  "url": "https://example.com/geo/my.dat"\n}',
-      },
-      {
-        method: 'POST',
-        path: '/panel/api/custom-geo/update/:id',
-        summary: 'Replace a custom geo source. Same body shape as /add.',
-        params: [
-          { name: 'id', in: 'path', type: 'number', desc: 'Custom geo source ID.' },
-        ],
-      },
-      {
-        method: 'POST',
-        path: '/panel/api/custom-geo/delete/:id',
-        summary: 'Remove a custom geo source and its cached file.',
-        params: [
-          { name: 'id', in: 'path', type: 'number', desc: 'Custom geo source ID.' },
-        ],
-      },
-      {
-        method: 'POST',
-        path: '/panel/api/custom-geo/download/:id',
-        summary: 'Re-download one custom geo source on demand.',
-        params: [
-          { name: 'id', in: 'path', type: 'number', desc: 'Custom geo source ID.' },
-        ],
-      },
-      {
-        method: 'POST',
-        path: '/panel/api/custom-geo/update-all',
-        summary: 'Re-download every configured custom geo source. Errors are reported per-source in the response.',
       },
     ],
   },
@@ -1084,6 +1062,119 @@ export const sections: readonly Section[] = [
           { name: 'mode', in: 'body (form)', type: 'string', desc: '"tcp" for a fast dial-only probe (parallel-safe). Default/empty uses a full HTTP probe through a temp xray instance.' },
         ],
         body: 'outbound={"protocol":"freedom","settings":{}}&mode=tcp',
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/xray/testOutbounds',
+        summary: 'Test a batch of outbounds (max 50) through one shared temp xray instance. Returns an array of results in input order, each with the outbound tag, delay, HTTP status and a connect/TLS/TTFB timing breakdown.',
+        params: [
+          { name: 'outbounds', in: 'body (form)', type: 'string', desc: 'JSON array of outbound configs to test (required).' },
+          { name: 'allOutbounds', in: 'body (form)', type: 'string', desc: 'JSON array of all outbounds — used to resolve dialerProxy chains.' },
+          { name: 'mode', in: 'body (form)', type: 'string', desc: '"tcp" for fast dial-only probes (UDP-transport outbounds are still probed over HTTP). Default/empty routes a real HTTP request through each outbound.' },
+        ],
+        body: 'outbounds=[{"tag":"direct","protocol":"freedom","settings":{}}]&mode=http',
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/xray/balancerStatus',
+        summary: 'Live state of routing balancers in the running core (RoutingService.GetBalancerInfo): current override and the targets the strategy prefers. Returns a map keyed by balancer tag.',
+        params: [
+          { name: 'tags', in: 'body (form)', type: 'string', desc: 'Comma-separated balancer tags to query (e.g. "b1,b2").' },
+        ],
+        body: 'tags=b1,b2',
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/xray/balancerOverride',
+        summary: 'Force a balancer in the running core to always pick one outbound (RoutingService.OverrideBalancerTarget). Applied live without a restart; cleared automatically when Xray restarts.',
+        params: [
+          { name: 'tag', in: 'body (form)', type: 'string', desc: 'Balancer tag (required).' },
+          { name: 'target', in: 'body (form)', type: 'string', desc: 'Outbound tag to force. Empty clears the override and returns control to the strategy.' },
+        ],
+        body: 'tag=b1&target=proxy',
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/xray/routeTest',
+        summary: 'Ask the running core which outbound its router would pick for a synthetic connection (RoutingService.TestRoute). No traffic is sent.',
+        params: [
+          { name: 'domain', in: 'body (form)', type: 'string', desc: 'Target domain. Either domain or ip is required.' },
+          { name: 'ip', in: 'body (form)', type: 'string', desc: 'Target IP. Either domain or ip is required.' },
+          { name: 'port', in: 'body (form)', type: 'number', desc: 'Target port (optional).' },
+          { name: 'network', in: 'body (form)', type: 'string', desc: '"tcp" (default) or "udp".' },
+          { name: 'inboundTag', in: 'body (form)', type: 'string', desc: 'Simulate arrival on this inbound (optional).' },
+          { name: 'protocol', in: 'body (form)', type: 'string', desc: 'Sniffed protocol such as http, tls, bittorrent (optional).' },
+          { name: 'email', in: 'body (form)', type: 'string', desc: 'User attribution for user-based rules (optional).' },
+        ],
+        body: 'domain=example.com&port=443&network=tcp',
+      },
+      {
+        method: 'GET',
+        path: '/panel/api/xray/outbound-subs',
+        summary: 'List all outbound subscriptions (remote URLs that supply additional outbounds), newest first.',
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/xray/outbound-subs',
+        summary: 'Create an outbound subscription. The URL is fetched, parsed into outbounds with stable tags, and merged additively into the running Xray config.',
+        params: [
+          { name: 'remark', in: 'body (form)', type: 'string', desc: 'Optional display label.' },
+          { name: 'url', in: 'body (form)', type: 'string', desc: 'Subscription URL (required). Must be a public http(s) address; private/internal targets are blocked unless allowPrivate is true.' },
+          { name: 'tagPrefix', in: 'body (form)', type: 'string', desc: 'Prefix for generated outbound tags. Defaults to "sub<id>-".' },
+          { name: 'updateInterval', in: 'body (form)', type: 'integer', desc: 'Seconds between auto-refreshes. Default 600.' },
+          { name: 'enabled', in: 'body (form)', type: 'boolean', desc: 'Whether the subscription is active. Default true.' },
+          { name: 'allowPrivate', in: 'body (form)', type: 'boolean', desc: 'Allow the URL to point at a private/internal/loopback address (localhost/LAN). Default false (SSRF guard blocks private targets).' },
+          { name: 'prepend', in: 'body (form)', type: 'boolean', desc: 'Place this subscription\'s outbounds before the manual template outbounds (so one can become the default). Default false.' },
+        ],
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/xray/outbound-subs/:id',
+        summary: 'Update an existing outbound subscription by id. Accepts the same form fields as create.',
+        params: [
+          { name: 'id', in: 'path', type: 'integer', desc: 'Subscription id.' },
+        ],
+      },
+      {
+        method: 'DELETE',
+        path: '/panel/api/xray/outbound-subs/:id',
+        summary: 'Delete an outbound subscription by id.',
+        params: [
+          { name: 'id', in: 'path', type: 'integer', desc: 'Subscription id.' },
+        ],
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/xray/outbound-subs/:id/del',
+        summary: 'Delete an outbound subscription by id (POST alias of DELETE for axios-friendly clients).',
+        params: [
+          { name: 'id', in: 'path', type: 'integer', desc: 'Subscription id.' },
+        ],
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/xray/outbound-subs/:id/refresh',
+        summary: 'Force an immediate re-fetch of the subscription and return the parsed outbounds. Signals Xray to reload.',
+        params: [
+          { name: 'id', in: 'path', type: 'integer', desc: 'Subscription id.' },
+        ],
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/xray/outbound-subs/:id/move',
+        summary: 'Reorder a subscription one step up or down in priority (controls its position in the merged outbounds).',
+        params: [
+          { name: 'id', in: 'path', type: 'integer', desc: 'Subscription id.' },
+          { name: 'dir', in: 'body (form)', type: 'string', desc: '"up" to raise priority, anything else to lower it.' },
+        ],
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/xray/outbound-subs/parse',
+        summary: 'Preview a subscription URL: fetch and parse it into outbounds without persisting anything.',
+        params: [
+          { name: 'url', in: 'body (form)', type: 'string', desc: 'Subscription URL to preview (required).' },
+        ],
       },
     ],
   },
