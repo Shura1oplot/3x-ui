@@ -3,11 +3,16 @@
 # ========================================================
 
 FROM node:22-trixie AS frontend
+
 WORKDIR /src/frontend
+
 COPY frontend/package.json frontend/package-lock.json ./
+
 RUN npm ci
+
 COPY frontend/ ./
-COPY web/translation /src/web/translation
+COPY internal/web/translation /src/internal/web/translation
+
 RUN npm run build
 
 
@@ -33,7 +38,7 @@ RUN apt-get update \
 
 COPY . .
 
-COPY --from=frontend /src/web/dist ./web/dist
+COPY --from=frontend /src/internal/web/dist ./internal/web/dist
 
 ENV CGO_ENABLED=1
 ENV CGO_CFLAGS="-D_LARGEFILE64_SOURCE"
