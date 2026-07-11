@@ -10,6 +10,7 @@ import (
 	"github.com/mhsanaei/3x-ui/v3/internal/web/entity"
 	"github.com/mhsanaei/3x-ui/v3/internal/web/middleware"
 	"github.com/mhsanaei/3x-ui/v3/internal/web/service"
+	"github.com/mhsanaei/3x-ui/v3/internal/web/service/email"
 	"github.com/mhsanaei/3x-ui/v3/internal/web/service/panel"
 	"github.com/mhsanaei/3x-ui/v3/internal/web/session"
 
@@ -18,10 +19,23 @@ import (
 
 // updateUserForm represents the form for updating user credentials.
 type updateUserForm struct {
-	OldUsername string `json:"oldUsername" form:"oldUsername"`
-	OldPassword string `json:"oldPassword" form:"oldPassword"`
-	NewUsername string `json:"newUsername" form:"newUsername"`
-	NewPassword string `json:"newPassword" form:"newPassword"`
+	OldUsername   string `json:"oldUsername" form:"oldUsername"`
+	OldPassword   string `json:"oldPassword" form:"oldPassword"`
+	NewUsername   string `json:"newUsername" form:"newUsername"`
+	NewPassword   string `json:"newPassword" form:"newPassword"`
+	TwoFactorCode string `json:"twoFactorCode" form:"twoFactorCode"`
+}
+
+// updateSettingForm carries the persisted settings plus request-scoped fields
+// that must never land in the settings table: the 2FA confirmation code and
+// the explicit clear flags for redacted secrets (a blank secret alone means
+// "unchanged", so clearing needs its own signal — see #5724).
+type updateSettingForm struct {
+	entity.AllSetting
+	TwoFactorCode     string `json:"twoFactorCode" form:"twoFactorCode"`
+	ClearTgBotToken   bool   `json:"clearTgBotToken" form:"clearTgBotToken"`
+	ClearLdapPassword bool   `json:"clearLdapPassword" form:"clearLdapPassword"`
+	ClearSmtpPassword bool   `json:"clearSmtpPassword" form:"clearSmtpPassword"`
 }
 
 // SettingController handles settings and user management operations.
@@ -54,11 +68,14 @@ func (a *SettingController) initRouter(g *gin.RouterGroup) {
 	g.POST("/apiTokens/create", a.createApiToken)
 	g.POST("/apiTokens/delete/:id", a.deleteApiToken)
 	g.POST("/apiTokens/setEnabled/:id", a.setApiTokenEnabled)
+	g.POST("/testSmtp", a.testSmtp)
+	g.POST("/testTgBot", a.testTgBot)
 }
 
-// getAllSetting retrieves all current settings.
+// getAllSetting retrieves all current settings as the browser-safe view:
+// secret values are redacted and surfaced as has* presence flags instead.
 func (a *SettingController) getAllSetting(c *gin.Context) {
-	allSetting, err := a.settingService.GetAllSetting()
+	allSetting, err := a.settingService.GetAllSettingView()
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.settings.toasts.getSettings"), err)
 		return
@@ -78,24 +95,49 @@ func (a *SettingController) getDefaultSettings(c *gin.Context) {
 
 // updateSetting updates all settings with the provided data.
 func (a *SettingController) updateSetting(c *gin.Context) {
-	allSetting, ok := middleware.BindAndValidate[entity.AllSetting](c)
+	form, ok := middleware.BindAndValidate[updateSettingForm](c)
 	if !ok {
 		return
 	}
+	allSetting := &form.AllSetting
 	oldTwoFactor, twoFactorErr := a.settingService.GetTwoFactorEnable()
 	oldPanelOutbound, _ := a.settingService.GetPanelOutbound()
-	err := a.settingService.UpdateAllSetting(allSetting)
+	oldTgEnable, _ := a.settingService.GetTgbotEnabled()
+	oldTgToken, _ := a.settingService.GetTgBotToken()
+	oldTgChatId, _ := a.settingService.GetTgBotChatId()
+	oldTgAPIServer, _ := a.settingService.GetTgBotAPIServer()
+	if twoFactorErr == nil && oldTwoFactor && !allSetting.TwoFactorEnable {
+		if err := a.settingService.VerifyTwoFactorCode(form.TwoFactorCode); err != nil {
+			jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifySettings"), err)
+			return
+		}
+	}
+	err := a.settingService.UpdateAllSetting(allSetting, service.SecretClears{
+		TgBotToken:   form.ClearTgBotToken,
+		LdapPassword: form.ClearLdapPassword,
+		SmtpPassword: form.ClearSmtpPassword,
+	})
 	if err == nil && twoFactorErr == nil && !oldTwoFactor && allSetting.TwoFactorEnable {
 		if bumpErr := a.userService.BumpLoginEpoch(); bumpErr != nil {
 			err = bumpErr
 		}
 	}
-	if err == nil && allSetting.PanelOutbound != oldPanelOutbound {
+	if err == nil && form.PanelOutbound != oldPanelOutbound {
 		// The egress bridge lives in the generated config; reconcile the
 		// running core. One SOCKS inbound plus one routing rule — both
 		// hot-appliable, so this normally does not restart Xray.
 		if applyErr := a.xrayService.RestartXray(false); applyErr != nil {
 			logger.Warning("apply panel outbound change failed:", applyErr)
+		}
+	}
+	// UpdateAllSetting already restored a redacted-blank token, so allSetting.TgBotToken is the effective value to compare.
+	if err == nil && reloadTgbotFunc != nil {
+		tgChanged := oldTgEnable != allSetting.TgBotEnable ||
+			(allSetting.TgBotEnable && (oldTgToken != allSetting.TgBotToken ||
+				oldTgChatId != allSetting.TgBotChatId ||
+				oldTgAPIServer != allSetting.TgBotAPIServer))
+		if tgChanged {
+			reloadTgbotFunc()
 		}
 	}
 	jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifySettings"), err)
@@ -116,6 +158,10 @@ func (a *SettingController) updateUser(c *gin.Context) {
 	}
 	if form.NewUsername == "" || form.NewPassword == "" {
 		jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifyUserError"), errors.New(I18nWeb(c, "pages.settings.toasts.userPassMustBeNotEmpty")))
+		return
+	}
+	if err := a.settingService.VerifyTwoFactorCode(form.TwoFactorCode); err != nil {
+		jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifyUserError"), err)
 		return
 	}
 	err = a.userService.UpdateUser(user.Id, form.NewUsername, form.NewPassword)
@@ -198,3 +244,63 @@ func (a *SettingController) setApiTokenEnabled(c *gin.Context) {
 	}
 	jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifySettings"), a.apiTokenService.SetEnabled(id, form.Enabled))
 }
+
+func (a *SettingController) testSmtp(c *gin.Context) {
+	if emailService == nil {
+		jsonMsg(c, I18nWeb(c, "pages.settings.smtpNotInitialized"), errors.New("email service not available"))
+		return
+	}
+	logger.Info("SMTP test: starting...")
+	result := emailService.TestConnection()
+	if !result.Success {
+		logger.Warning("SMTP test failed at", result.Stage+":", result.Message)
+		c.JSON(200, gin.H{
+			"success": false,
+			"stage":   result.Stage,
+			"msg":     result.Message,
+		})
+		return
+	}
+	logger.Info("SMTP test: success")
+	c.JSON(200, gin.H{
+		"success": true,
+		"stage":   result.Stage,
+		"msg":     result.Message,
+	})
+}
+
+func (a *SettingController) testTgBot(c *gin.Context) {
+	enabled, err := a.settingService.GetTgbotEnabled()
+	if err != nil || !enabled {
+		jsonMsg(c, I18nWeb(c, "pages.settings.tgBotNotEnabled"), errors.New("telegram bot disabled"))
+		return
+	}
+	// Import tgbot package would create a circular dependency, so we call
+	// the test through the global function registered at startup.
+	if testTgFunc != nil {
+		if err := testTgFunc(); err != nil {
+			jsonMsg(c, I18nWeb(c, "pages.settings.tgTestFailed")+": "+err.Error(), err)
+			return
+		}
+		jsonMsg(c, I18nWeb(c, "pages.settings.tgTestSuccess"), nil)
+		return
+	}
+	jsonMsg(c, I18nWeb(c, "pages.settings.tgBotNotRunning"), errors.New("bot not started"))
+}
+
+// testTgFunc is set from web layer to test Telegram sending without circular imports.
+var testTgFunc func() error
+
+// SetTestTgFunc registers the function used to test Telegram sending.
+func SetTestTgFunc(fn func() error) { testTgFunc = fn }
+
+// reloadTgbotFunc is wired from the web layer; importing tgbot here would be a circular dependency.
+var reloadTgbotFunc func()
+
+func SetReloadTgbotFunc(fn func()) { reloadTgbotFunc = fn }
+
+// emailService is set from web layer.
+var emailService *email.EmailService
+
+// SetEmailService registers the email service for test endpoints.
+func SetEmailService(s *email.EmailService) { emailService = s }

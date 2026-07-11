@@ -12,6 +12,9 @@ export type Protocol = z.infer<typeof ProtocolSchema>;
 export const SubLinkProviderSchema = z.unknown();
 export type SubLinkProvider = z.infer<typeof SubLinkProviderSchema>;
 
+export const staticEgressResolverSchema = z.string();
+export type staticEgressResolver = z.infer<typeof staticEgressResolverSchema>;
+
 export const transportBitsSchema = z.number().int();
 export type transportBits = z.infer<typeof transportBitsSchema>;
 
@@ -31,6 +34,7 @@ export const AllSettingSchema = z.object({
   ldapFlagField: z.string(),
   ldapHost: z.string(),
   ldapInboundTags: z.string(),
+  ldapInsecureSkipVerify: z.boolean(),
   ldapInvertFlag: z.boolean(),
   ldapPassword: z.string(),
   ldapPort: z.number().int().min(0).max(65535),
@@ -42,9 +46,19 @@ export const AllSettingSchema = z.object({
   ldapVlessField: z.string(),
   pageSize: z.number().int().min(0).max(1000),
   panelOutbound: z.string(),
-  remarkModel: z.string(),
+  remarkTemplate: z.string(),
   restartXrayOnClientDisable: z.boolean(),
   sessionMaxAge: z.number().int().min(1).max(525600),
+  smtpCpu: z.number().int().min(0).max(100),
+  smtpEnable: z.boolean(),
+  smtpEnabledEvents: z.string(),
+  smtpEncryptionType: z.string(),
+  smtpHost: z.string(),
+  smtpMemory: z.number().int().min(0).max(100),
+  smtpPassword: z.string(),
+  smtpPort: z.number().int().min(1).max(65535),
+  smtpTo: z.string(),
+  smtpUsername: z.string(),
   subAnnounce: z.string(),
   subCertFile: z.string(),
   subClashEnable: z.boolean(),
@@ -53,10 +67,12 @@ export const AllSettingSchema = z.object({
   subClashRules: z.string(),
   subClashURI: z.string(),
   subDomain: z.string(),
-  subEmailInRemark: z.boolean(),
   subEnable: z.boolean(),
   subEnableRouting: z.boolean(),
   subEncrypt: z.boolean(),
+  subHideSettings: z.boolean(),
+  subIncyEnableRouting: z.boolean(),
+  subIncyRoutingRules: z.string(),
   subJsonEnable: z.boolean(),
   subJsonFinalMask: z.string(),
   subJsonMux: z.string(),
@@ -69,7 +85,6 @@ export const AllSettingSchema = z.object({
   subPort: z.number().int().min(1).max(65535),
   subProfileUrl: z.string(),
   subRoutingRules: z.string(),
-  subShowInfo: z.boolean(),
   subSupportUrl: z.string(),
   subThemeDir: z.string(),
   subTitle: z.string(),
@@ -79,11 +94,12 @@ export const AllSettingSchema = z.object({
   tgBotBackup: z.boolean(),
   tgBotChatId: z.string(),
   tgBotEnable: z.boolean(),
-  tgBotLoginNotify: z.boolean(),
   tgBotProxy: z.string(),
   tgBotToken: z.string(),
   tgCpu: z.number().int().min(0).max(100),
+  tgEnabledEvents: z.string(),
   tgLang: z.string(),
+  tgMemory: z.number().int().min(0).max(100),
   tgRunTime: z.string(),
   timeLocation: z.string(),
   trafficDiff: z.number().int().min(0).max(100),
@@ -108,6 +124,7 @@ export const AllSettingViewSchema = z.object({
   hasApiToken: z.boolean(),
   hasLdapPassword: z.boolean(),
   hasNordSecret: z.boolean(),
+  hasSmtpPassword: z.boolean(),
   hasTgBotToken: z.boolean(),
   hasTwoFactorToken: z.boolean(),
   hasWarpSecret: z.boolean(),
@@ -122,6 +139,7 @@ export const AllSettingViewSchema = z.object({
   ldapFlagField: z.string(),
   ldapHost: z.string(),
   ldapInboundTags: z.string(),
+  ldapInsecureSkipVerify: z.boolean(),
   ldapInvertFlag: z.boolean(),
   ldapPassword: z.string(),
   ldapPort: z.number().int().min(0).max(65535),
@@ -133,9 +151,19 @@ export const AllSettingViewSchema = z.object({
   ldapVlessField: z.string(),
   pageSize: z.number().int().min(0).max(1000),
   panelOutbound: z.string(),
-  remarkModel: z.string(),
+  remarkTemplate: z.string(),
   restartXrayOnClientDisable: z.boolean(),
   sessionMaxAge: z.number().int().min(1).max(525600),
+  smtpCpu: z.number().int().min(0).max(100),
+  smtpEnable: z.boolean(),
+  smtpEnabledEvents: z.string(),
+  smtpEncryptionType: z.string(),
+  smtpHost: z.string(),
+  smtpMemory: z.number().int().min(0).max(100),
+  smtpPassword: z.string(),
+  smtpPort: z.number().int().min(1).max(65535),
+  smtpTo: z.string(),
+  smtpUsername: z.string(),
   subAnnounce: z.string(),
   subCertFile: z.string(),
   subClashEnable: z.boolean(),
@@ -144,10 +172,12 @@ export const AllSettingViewSchema = z.object({
   subClashRules: z.string(),
   subClashURI: z.string(),
   subDomain: z.string(),
-  subEmailInRemark: z.boolean(),
   subEnable: z.boolean(),
   subEnableRouting: z.boolean(),
   subEncrypt: z.boolean(),
+  subHideSettings: z.boolean(),
+  subIncyEnableRouting: z.boolean(),
+  subIncyRoutingRules: z.string(),
   subJsonEnable: z.boolean(),
   subJsonFinalMask: z.string(),
   subJsonMux: z.string(),
@@ -160,7 +190,6 @@ export const AllSettingViewSchema = z.object({
   subPort: z.number().int().min(1).max(65535),
   subProfileUrl: z.string(),
   subRoutingRules: z.string(),
-  subShowInfo: z.boolean(),
   subSupportUrl: z.string(),
   subThemeDir: z.string(),
   subTitle: z.string(),
@@ -170,11 +199,12 @@ export const AllSettingViewSchema = z.object({
   tgBotBackup: z.boolean(),
   tgBotChatId: z.string(),
   tgBotEnable: z.boolean(),
-  tgBotLoginNotify: z.boolean(),
   tgBotProxy: z.string(),
   tgBotToken: z.string(),
   tgCpu: z.number().int().min(0).max(100),
+  tgEnabledEvents: z.string(),
   tgLang: z.string(),
+  tgMemory: z.number().int().min(0).max(100),
   tgRunTime: z.string(),
   timeLocation: z.string(),
   trafficDiff: z.number().int().min(0).max(100),
@@ -210,6 +240,8 @@ export const ApiTokenViewSchema = z.object({
 export type ApiTokenView = z.infer<typeof ApiTokenViewSchema>;
 
 export const ClientSchema = z.object({
+  adTag: z.string().optional(),
+  allowedIPs: z.array(z.string()).optional(),
   auth: z.string().optional(),
   comment: z.string(),
   created_at: z.number().int().optional(),
@@ -219,10 +251,15 @@ export const ClientSchema = z.object({
   flow: z.string().optional(),
   group: z.string().optional(),
   id: z.string().optional(),
+  keepAlive: z.number().int().optional(),
   limitIp: z.number().int(),
   password: z.string().optional(),
+  preSharedKey: z.string().optional(),
+  privateKey: z.string().optional(),
+  publicKey: z.string().optional(),
   reset: z.number().int(),
   reverse: z.lazy(() => ClientReverseSchema).nullable().optional(),
+  secret: z.string().optional(),
   security: z.string(),
   subId: z.string(),
   tgId: z.number().int(),
@@ -240,6 +277,8 @@ export const ClientInboundSchema = z.object({
 export type ClientInbound = z.infer<typeof ClientInboundSchema>;
 
 export const ClientRecordSchema = z.object({
+  adTag: z.string(),
+  allowedIPs: z.string(),
   auth: z.string(),
   comment: z.string(),
   createdAt: z.number().int(),
@@ -249,10 +288,15 @@ export const ClientRecordSchema = z.object({
   flow: z.string(),
   group: z.string(),
   id: z.number().int(),
+  keepAlive: z.number().int(),
   limitIp: z.number().int(),
   password: z.string(),
+  preSharedKey: z.string(),
+  privateKey: z.string(),
+  publicKey: z.string(),
   reset: z.number().int(),
   reverse: z.unknown(),
+  secret: z.string(),
   security: z.string(),
   subId: z.string(),
   tgId: z.number().int(),
@@ -294,6 +338,79 @@ export const HistoryOfSeedersSchema = z.object({
   seederName: z.string(),
 });
 export type HistoryOfSeeders = z.infer<typeof HistoryOfSeedersSchema>;
+
+export const HostSchema = z.object({
+  address: z.string(),
+  allowInsecure: z.boolean(),
+  alpn: z.array(z.string()),
+  createdAt: z.number().int(),
+  echConfigList: z.string(),
+  excludeFromSubTypes: z.array(z.string()),
+  finalMask: z.string(),
+  fingerprint: z.string(),
+  groupId: z.string(),
+  hostHeader: z.string(),
+  id: z.number().int(),
+  inboundId: z.number().int(),
+  isDisabled: z.boolean(),
+  isHidden: z.boolean(),
+  keepSniBlank: z.boolean(),
+  mihomoIpVersion: z.enum(['dual', 'ipv4', 'ipv6', 'ipv4-prefer', 'ipv6-prefer']),
+  mihomoX25519: z.boolean(),
+  muxParams: z.unknown(),
+  nodeGuids: z.array(z.string()).optional(),
+  overrideSniFromAddress: z.boolean(),
+  path: z.string(),
+  pinnedPeerCertSha256: z.array(z.string()),
+  port: z.number().int().min(0).max(65535),
+  remark: z.string().max(256),
+  security: z.enum(['same', 'tls', 'none', 'reality']),
+  serverDescription: z.string().max(64),
+  shuffleHost: z.boolean(),
+  sni: z.string(),
+  sockoptParams: z.unknown(),
+  sortOrder: z.number().int(),
+  tags: z.array(z.string()),
+  updatedAt: z.number().int(),
+  verifyPeerCertByName: z.string(),
+  vlessRoute: z.string(),
+});
+export type Host = z.infer<typeof HostSchema>;
+
+export const HostGroupSchema = z.object({
+  allowInsecure: z.boolean(),
+  alpn: z.array(z.string()),
+  echConfigList: z.string(),
+  excludeFromSubTypes: z.array(z.string()),
+  finalMask: z.string(),
+  fingerprint: z.string(),
+  groupId: z.string(),
+  hostHeader: z.string(),
+  hosts: z.array(z.string()),
+  inboundIds: z.array(z.number().int()),
+  isDisabled: z.boolean(),
+  isHidden: z.boolean(),
+  keepSniBlank: z.boolean(),
+  mihomoIpVersion: z.enum(['dual', 'ipv4', 'ipv6', 'ipv4-prefer', 'ipv6-prefer']),
+  mihomoX25519: z.boolean(),
+  muxParams: z.string(),
+  nodeGuids: z.array(z.string()),
+  overrideSniFromAddress: z.boolean(),
+  path: z.string(),
+  pinnedPeerCertSha256: z.array(z.string()),
+  port: z.number().int().min(0).max(65535),
+  remark: z.string().max(256),
+  security: z.enum(['same', 'tls', 'none', 'reality']),
+  serverDescription: z.string().max(64),
+  shuffleHost: z.boolean(),
+  sni: z.string(),
+  sockoptParams: z.string(),
+  sortOrder: z.number().int(),
+  tags: z.array(z.string()),
+  verifyPeerCertByName: z.string(),
+  vlessRoute: z.string(),
+});
+export type HostGroup = z.infer<typeof HostGroupSchema>;
 
 export const InboundSchema = z.object({
   clientStats: z.array(z.lazy(() => ClientTrafficSchema)),
@@ -343,14 +460,23 @@ export const InboundFallbackSchema = z.object({
 export type InboundFallback = z.infer<typeof InboundFallbackSchema>;
 
 export const InboundOptionSchema = z.object({
+  enable: z.boolean(),
   id: z.number().int(),
+  listen: z.string().optional(),
+  mtprotoDomain: z.string().optional(),
+  nodeAddress: z.string().optional(),
   nodeId: z.number().int().nullable().optional(),
   port: z.number().int(),
   protocol: z.string(),
   remark: z.string(),
+  shareAddr: z.string().optional(),
+  shareAddrStrategy: z.string().optional(),
   ssMethod: z.string(),
   tag: z.string(),
   tlsFlowCapable: z.boolean(),
+  wgDns: z.string().optional(),
+  wgMtu: z.number().int().optional(),
+  wgPublicKey: z.string().optional(),
 });
 export type InboundOption = z.infer<typeof InboundOptionSchema>;
 
@@ -362,6 +488,7 @@ export const MsgSchema = z.object({
 export type Msg = z.infer<typeof MsgSchema>;
 
 export const NodeSchema = z.object({
+  activeCount: z.number().int(),
   address: z.string(),
   allowPrivateAddress: z.boolean(),
   apiToken: z.string(),
@@ -372,6 +499,7 @@ export const NodeSchema = z.object({
   cpuPct: z.number(),
   createdAt: z.number().int(),
   depletedCount: z.number().int(),
+  disabledCount: z.number().int(),
   enable: z.boolean(),
   guid: z.string(),
   id: z.number().int(),
@@ -383,7 +511,10 @@ export const NodeSchema = z.object({
   latencyMs: z.number().int(),
   memPct: z.number(),
   name: z.string(),
+  netDown: z.number().int(),
+  netUp: z.number().int(),
   onlineCount: z.number().int(),
+  outboundTag: z.string(),
   panelVersion: z.string(),
   parentGuid: z.string().optional(),
   pinnedCertSha256: z.string(),
@@ -391,7 +522,7 @@ export const NodeSchema = z.object({
   remark: z.string(),
   scheme: z.enum(['http', 'https']),
   status: z.string(),
-  tlsVerifyMode: z.enum(['verify', 'skip', 'pin']),
+  tlsVerifyMode: z.enum(['verify', 'skip', 'pin', 'mtls']),
   transitive: z.boolean().optional(),
   updatedAt: z.number().int(),
   uptimeSecs: z.number().int(),
@@ -410,6 +541,14 @@ export const OutboundTrafficsSchema = z.object({
 });
 export type OutboundTraffics = z.infer<typeof OutboundTrafficsSchema>;
 
+export const PanelUpdateStatusSchema = z.object({
+  exitCode: z.number().int(),
+  finishedAt: z.number().int(),
+  runId: z.string(),
+  state: z.string(),
+});
+export type PanelUpdateStatus = z.infer<typeof PanelUpdateStatusSchema>;
+
 export const ProbeResultUISchema = z.object({
   cpuPct: z.number(),
   error: z.string(),
@@ -423,6 +562,28 @@ export const ProbeResultUISchema = z.object({
   xrayVersion: z.string(),
 });
 export type ProbeResultUI = z.infer<typeof ProbeResultUISchema>;
+
+export const RealityScanResultSchema = z.object({
+  alpn: z.string(),
+  certIssuer: z.string(),
+  certSubject: z.string(),
+  certValid: z.boolean(),
+  curveID: z.string(),
+  feasible: z.boolean(),
+  h2: z.boolean(),
+  host: z.string(),
+  ip: z.string(),
+  latencyMs: z.number().int(),
+  notAfter: z.string(),
+  port: z.number().int(),
+  reason: z.string(),
+  serverNames: z.array(z.string()),
+  target: z.string(),
+  tls13: z.boolean(),
+  tlsVersion: z.string(),
+  x25519: z.boolean(),
+});
+export type RealityScanResult = z.infer<typeof RealityScanResultSchema>;
 
 export const SettingSchema = z.object({
   id: z.number().int(),

@@ -5,11 +5,14 @@ import { CopyOutlined, EyeOutlined, QrcodeOutlined, ReloadOutlined } from '@ant-
 
 import { ClipboardManager, HttpUtil, IntlUtil, SizeFormatter } from '@/utils';
 import { formatInboundLabel } from '@/lib/inbounds/label';
+import { normalizeClientIps, type ClientIpInfo } from '@/lib/clients/ip-log';
 import { useDatepicker } from '@/hooks/useDatepicker';
 import type { ClientRecord, InboundOption } from '@/hooks/useClients';
 import { isPostQuantumLink } from '@/lib/xray/inbound-link';
 import { LinkTags, linkMetaText, parseLinkParts } from '@/lib/xray/link-label';
 import { QrPanel } from '@/pages/inbounds/qr';
+import ConfigBlock from '@/components/clients/ConfigBlock';
+import { buildWireguardClientConfig, findWireguardInbound, isWireguardClient } from './wireguardConfig';
 import './ClientInfoModal.css';
 
 const INBOUND_PROTOCOL_COLORS: Record<string, string> = {
@@ -34,6 +37,7 @@ interface SubSettings {
   subJsonEnable: boolean;
   subClashURI: string;
   subClashEnable: boolean;
+  publicHost?: string;
 }
 
 interface ClientInfoModalProps {
@@ -57,6 +61,7 @@ const DEFAULT_SUB: SubSettings = {
   subJsonEnable: false,
   subClashURI: '',
   subClashEnable: false,
+  publicHost: '',
 };
 
 export default function ClientInfoModal({
@@ -80,7 +85,7 @@ export default function ClientInfoModal({
   const dateLabel = (ts?: number) => (!ts || ts <= 0 ? '-' : IntlUtil.formatDate(ts, datepicker));
   const [messageApi, messageContextHolder] = message.useMessage();
   const [links, setLinks] = useState<string[]>([]);
-  const [clientIps, setClientIps] = useState<string[]>([]);
+  const [clientIps, setClientIps] = useState<ClientIpInfo[]>([]);
   const [ipsLoading, setIpsLoading] = useState(false);
   const [ipsClearing, setIpsClearing] = useState(false);
   const [ipsModalOpen, setIpsModalOpen] = useState(false);
@@ -131,6 +136,11 @@ export default function ClientInfoModal({
   }, [client?.subId, subSettings?.subClashEnable, subSettings?.subClashURI]);
 
   const showSubscription = !!(subSettings?.enable && client?.subId);
+  const wgInbound = useMemo(() => findWireguardInbound(client, inboundsById), [client, inboundsById]);
+  const wgConfigText = useMemo(() => {
+    if (!client || !wgInbound || !isWireguardClient(client)) return '';
+    return buildWireguardClientConfig(client, wgInbound, window.location.hostname, subSettings?.publicHost ?? '');
+  }, [client, wgInbound, subSettings?.publicHost]);
 
   async function copyValue(text: string) {
     if (!text) return;
@@ -144,8 +154,7 @@ export default function ClientInfoModal({
     try {
       const msg = await HttpUtil.post(`/panel/api/clients/ips/${encodeURIComponent(client.email)}`) as ApiMsg<unknown[]>;
       if (!msg?.success) { setClientIps([]); return; }
-      const arr = Array.isArray(msg.obj) ? msg.obj : [];
-      setClientIps(arr.filter((x): x is string => typeof x === 'string' && x.length > 0));
+      setClientIps(normalizeClientIps(msg.obj));
     } finally {
       setIpsLoading(false);
     }
@@ -211,7 +220,7 @@ export default function ClientInfoModal({
                   <td>
                     <Tag className="info-large-tag">{client.subId || '-'}</Tag>
                     {client.subId && (
-                      <Button size="small" type="text" icon={<CopyOutlined />} onClick={() => copyValue(client.subId!)} />
+                      <Button size="small" type="text" icon={<CopyOutlined />} aria-label={t('copy')} onClick={() => copyValue(client.subId!)} />
                     )}
                   </td>
                 </tr>
@@ -220,7 +229,7 @@ export default function ClientInfoModal({
                     <td>{t('pages.clients.uuid')}</td>
                     <td>
                       <Tag className="info-large-tag">{client.uuid}</Tag>
-                      <Button size="small" type="text" icon={<CopyOutlined />} onClick={() => copyValue(client.uuid!)} />
+                      <Button size="small" type="text" icon={<CopyOutlined />} aria-label={t('copy')} onClick={() => copyValue(client.uuid!)} />
                     </td>
                   </tr>
                 )}
@@ -229,7 +238,7 @@ export default function ClientInfoModal({
                     <td>{t('password')}</td>
                     <td>
                       <Tag className="info-large-tag">{client.password}</Tag>
-                      <Button size="small" type="text" icon={<CopyOutlined />} onClick={() => copyValue(client.password!)} />
+                      <Button size="small" type="text" icon={<CopyOutlined />} aria-label={t('copy')} onClick={() => copyValue(client.password!)} />
                     </td>
                   </tr>
                 )}
@@ -238,7 +247,7 @@ export default function ClientInfoModal({
                     <td>{t('pages.clients.auth')}</td>
                     <td>
                       <Tag className="info-large-tag">{client.auth}</Tag>
-                      <Button size="small" type="text" icon={<CopyOutlined />} onClick={() => copyValue(client.auth!)} />
+                      <Button size="small" type="text" icon={<CopyOutlined />} aria-label={t('copy')} onClick={() => copyValue(client.auth!)} />
                     </td>
                   </tr>
                 )}
@@ -286,7 +295,7 @@ export default function ClientInfoModal({
                 <tr>
                   <td>{t('pages.inbounds.IPLimitlog')}</td>
                   <td>
-                    <Button size="small" icon={<EyeOutlined />} loading={ipsLoading} onClick={openIpsModal}>
+                    <Button size="small" icon={<EyeOutlined />} aria-label={t('pages.clients.ipLog')} loading={ipsLoading} onClick={openIpsModal}>
                       {clientIps.length > 0 ? clientIps.length : ''}
                     </Button>
                   </td>
@@ -299,6 +308,12 @@ export default function ClientInfoModal({
                   <td>{t('pages.inbounds.updatedAt')}</td>
                   <td><Tag>{dateLabel(client.updatedAt)}</Tag></td>
                 </tr>
+                {client.group && (
+                  <tr>
+                    <td>{t('pages.clients.group')}</td>
+                    <td><Tag color="geekblue">{client.group}</Tag></td>
+                  </tr>
+                )}
                 {client.comment && (
                   <tr>
                     <td>{t('pages.clients.comment')}</td>
@@ -350,44 +365,6 @@ export default function ClientInfoModal({
               </tbody>
             </table>
 
-            {links.length > 0 && (
-              <>
-                <Divider>{t('pages.inbounds.copyLink')}</Divider>
-                {links.map((link, idx) => {
-                  const parts = parseLinkParts(link, client.email);
-                  const fallback = `${t('pages.clients.link')} ${idx + 1}`;
-                  const rowTitle = (parts && linkMetaText(parts)) || fallback;
-                  const qrRemark = [parts?.remark, client.email].filter(Boolean).join('-') || rowTitle;
-                  const canQr = !isPostQuantumLink(link);
-                  return (
-                    <div key={idx} className="link-row">
-                      {parts
-                        ? <LinkTags parts={parts} />
-                        : <Tag className="link-row-tag">LINK</Tag>}
-                      <span className="link-row-title" title={rowTitle}>{rowTitle}</span>
-                      <div className="link-row-actions">
-                        <Tooltip title={t('copy')}>
-                          <Button size="small" icon={<CopyOutlined />} onClick={() => copyValue(link)} />
-                        </Tooltip>
-                        {canQr && (
-                          <Popover
-                            trigger="click"
-                            placement="left"
-                            destroyOnHidden
-                            content={<QrPanel value={link} remark={qrRemark} size={220} />}
-                          >
-                            <Tooltip title={t('pages.clients.qrCode')}>
-                              <Button size="small" icon={<QrcodeOutlined />} />
-                            </Tooltip>
-                          </Popover>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </>
-            )}
-
             {showSubscription && subLink && (
               <>
                 <Divider>{t('subscription.title')}</Divider>
@@ -404,7 +381,7 @@ export default function ClientInfoModal({
                   </a>
                   <div className="link-row-actions">
                     <Tooltip title={t('copy')}>
-                      <Button size="small" icon={<CopyOutlined />} onClick={() => copyValue(subLink)} />
+                      <Button size="small" icon={<CopyOutlined />} aria-label={t('copy')} onClick={() => copyValue(subLink)} />
                     </Tooltip>
                     <Popover
                       trigger="click"
@@ -413,7 +390,7 @@ export default function ClientInfoModal({
                       content={<QrPanel value={subLink} remark={`${client.email} — ${t('subscription.title')}`} size={220} />}
                     >
                       <Tooltip title={t('pages.clients.qrCode')}>
-                        <Button size="small" icon={<QrcodeOutlined />} />
+                        <Button size="small" icon={<QrcodeOutlined />} aria-label={t('pages.clients.qrCode')} />
                       </Tooltip>
                     </Popover>
                   </div>
@@ -432,7 +409,7 @@ export default function ClientInfoModal({
                     </a>
                     <div className="link-row-actions">
                       <Tooltip title={t('copy')}>
-                        <Button size="small" icon={<CopyOutlined />} onClick={() => copyValue(subJsonLink)} />
+                        <Button size="small" icon={<CopyOutlined />} aria-label={t('copy')} onClick={() => copyValue(subJsonLink)} />
                       </Tooltip>
                       <Popover
                         trigger="click"
@@ -441,7 +418,7 @@ export default function ClientInfoModal({
                         content={<QrPanel value={subJsonLink} remark={`${client.email} — JSON`} size={220} />}
                       >
                         <Tooltip title={t('pages.clients.qrCode')}>
-                          <Button size="small" icon={<QrcodeOutlined />} />
+                          <Button size="small" icon={<QrcodeOutlined />} aria-label={t('pages.clients.qrCode')} />
                         </Tooltip>
                       </Popover>
                     </div>
@@ -463,7 +440,7 @@ export default function ClientInfoModal({
                     </a>
                     <div className="link-row-actions">
                       <Tooltip title={t('copy')}>
-                        <Button size="small" icon={<CopyOutlined />} onClick={() => copyValue(subClashLink)} />
+                        <Button size="small" icon={<CopyOutlined />} aria-label={t('copy')} onClick={() => copyValue(subClashLink)} />
                       </Tooltip>
                       <Popover
                         trigger="click"
@@ -472,12 +449,62 @@ export default function ClientInfoModal({
                         content={<QrPanel value={subClashLink} remark={`${client.email} — Clash / Mihomo`} size={220} />}
                       >
                         <Tooltip title={t('pages.clients.qrCode')}>
-                          <Button size="small" icon={<QrcodeOutlined />} />
+                          <Button size="small" icon={<QrcodeOutlined />} aria-label={t('pages.clients.qrCode')} />
                         </Tooltip>
                       </Popover>
                     </div>
                   </div>
                 )}
+              </>
+            )}
+
+            {links.length > 0 && (
+              <>
+                <Divider>{t('pages.inbounds.copyLink')}</Divider>
+                {links.map((link, idx) => {
+                  const parts = parseLinkParts(link);
+                  const fallback = `${t('pages.clients.link')} ${idx + 1}`;
+                  const rowTitle = (parts && linkMetaText(parts)) || fallback;
+                  const qrRemark = parts?.remark || rowTitle;
+                  const canQr = !isPostQuantumLink(link);
+                  return (
+                    <div key={idx} className="link-row">
+                      {parts
+                        ? <LinkTags parts={parts} />
+                        : <Tag className="link-row-tag">LINK</Tag>}
+                      <span className="link-row-title" title={rowTitle}>{rowTitle}</span>
+                      <div className="link-row-actions">
+                        <Tooltip title={t('copy')}>
+                          <Button size="small" icon={<CopyOutlined />} aria-label={t('copy')} onClick={() => copyValue(link)} />
+                        </Tooltip>
+                        {canQr && (
+                          <Popover
+                            trigger="click"
+                            placement="left"
+                            destroyOnHidden
+                            content={<QrPanel value={link} remark={qrRemark} size={220} />}
+                          >
+                            <Tooltip title={t('pages.clients.qrCode')}>
+                              <Button size="small" icon={<QrcodeOutlined />} aria-label={t('pages.clients.qrCode')} />
+                            </Tooltip>
+                          </Popover>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </>
+            )}
+
+            {wgConfigText && client && (
+              <>
+                <Divider>{t('pages.clients.wireguardConfig')}</Divider>
+                <ConfigBlock
+                  label={t('pages.clients.config')}
+                  text={wgConfigText}
+                  fileName={`${client.email}.conf`}
+                  qrRemark={client.email || 'peer'}
+                />
               </>
             )}
           </>
@@ -503,7 +530,7 @@ export default function ClientInfoModal({
       >
         {clientIps.length > 0 ? (
           <div style={{ maxHeight: 360, overflowY: 'auto' }}>
-            {clientIps.map((ip, idx) => (
+            {clientIps.map((entry, idx) => (
               <Tag
                 key={idx}
                 color="blue"
@@ -516,7 +543,10 @@ export default function ClientInfoModal({
                   fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
                 }}
               >
-                {ip}
+                {entry.ip}{entry.time ? ` (${entry.time})` : ''}
+                {entry.node ? (
+                  <span style={{ marginInlineStart: 6, opacity: 0.85, fontWeight: 600 }}>@ {entry.node}</span>
+                ) : null}
               </Tag>
             ))}
           </div>

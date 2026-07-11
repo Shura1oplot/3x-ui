@@ -32,6 +32,13 @@ export const ClientRecordSchema = z.object({
   inboundIds: nullableNumberArray.optional(),
   traffic: ClientTrafficSchema.nullable().optional(),
   reverse: z.object({ tag: z.string().optional() }).loose().nullable().optional(),
+  privateKey: z.string().optional(),
+  publicKey: z.string().optional(),
+  allowedIPs: z.string().optional(),
+  preSharedKey: z.string().optional(),
+  keepAlive: z.number().optional(),
+  secret: z.string().optional(),
+  adTag: z.string().optional(),
   createdAt: z.number().optional(),
   updatedAt: z.number().optional(),
 }).loose();
@@ -44,8 +51,19 @@ export const InboundOptionSchema = z.object({
   port: z.number().optional(),
   tlsFlowCapable: z.boolean().optional(),
   ssMethod: z.string().optional(),
+  wgPublicKey: z.string().optional(),
+  wgMtu: z.number().optional(),
+  wgDns: z.string().optional(),
+  mtprotoDomain: z.string().optional(),
   // Hosting node id; absent/null for this panel's own inbounds (#4997).
   nodeId: z.number().nullable().optional(),
+  // Share-host resolution inputs, mirroring the backend resolveInboundAddress so
+  // the clients page picks the same WireGuard endpoint host as the subscription:
+  // the hosting node address, the inbound listen, and its share-address strategy.
+  nodeAddress: z.string().optional(),
+  listen: z.string().optional(),
+  shareAddr: z.string().optional(),
+  shareAddrStrategy: z.string().optional(),
 }).loose();
 
 export const InboundOptionsSchema = z.array(InboundOptionSchema);
@@ -71,9 +89,20 @@ export const ClientPageResponseSchema = z.object({
   groups: nullableStringArray.optional(),
 });
 
+// A per-client external link surfaced in the client's subscription:
+// kind=link is a single share link, kind=subscription is a remote sub URL.
+export const ExternalLinkSchema = z.object({
+  kind: z.enum(['link', 'subscription']).default('link'),
+  value: z.string(),
+  remark: z.string().optional().default(''),
+}).loose();
+
+export const ExternalLinkListSchema = z.array(ExternalLinkSchema).nullable().transform((v) => v ?? []);
+
 export const ClientHydrateSchema = z.object({
   client: ClientRecordSchema,
   inboundIds: nullableNumberArray,
+  externalLinks: ExternalLinkListSchema.optional(),
 });
 
 export const BulkAdjustResultSchema = z.object({
@@ -85,6 +114,13 @@ export const BulkAdjustResultSchema = z.object({
 
 export const BulkDeleteResultSchema = z.object({
   deleted: z.number(),
+  skipped: z
+    .array(z.object({ email: z.string(), reason: z.string() }))
+    .optional(),
+});
+
+export const BulkSetEnableResultSchema = z.object({
+  changed: z.number(),
   skipped: z
     .array(z.object({ email: z.string(), reason: z.string() }))
     .optional(),
@@ -177,8 +213,9 @@ export const ClientBulkAdjustFormSchema = z
   .object({
     addDays: z.number().int(),
     addGB: z.number(),
+    flow: z.string().optional().default(''),
   })
-  .refine((v) => v.addDays !== 0 || v.addGB !== 0, {
+  .refine((v) => v.addDays !== 0 || v.addGB !== 0 || v.flow !== '', {
     message: 'pages.clients.bulkAdjustNothing',
   });
 
@@ -203,11 +240,13 @@ export const ClientBulkAddFormSchema = z.object({
 export type ClientRecord = z.infer<typeof ClientRecordSchema>;
 export type ClientTraffic = z.infer<typeof ClientTrafficSchema>;
 export type InboundOption = z.infer<typeof InboundOptionSchema>;
+export type ExternalLink = z.infer<typeof ExternalLinkSchema>;
 export type ClientsSummary = z.infer<typeof ClientsSummarySchema>;
 export type ClientPageResponse = z.infer<typeof ClientPageResponseSchema>;
 export type ClientHydrate = z.infer<typeof ClientHydrateSchema>;
 export type BulkAdjustResult = z.infer<typeof BulkAdjustResultSchema>;
 export type BulkDeleteResult = z.infer<typeof BulkDeleteResultSchema>;
+export type BulkSetEnableResult = z.infer<typeof BulkSetEnableResultSchema>;
 export type BulkCreateResult = z.infer<typeof BulkCreateResultSchema>;
 export type BulkAttachResult = z.infer<typeof BulkAttachResultSchema>;
 export type BulkDetachResult = z.infer<typeof BulkDetachResultSchema>;

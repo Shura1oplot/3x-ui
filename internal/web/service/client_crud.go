@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	"github.com/mhsanaei/3x-ui/v3/internal/database"
 	"github.com/mhsanaei/3x-ui/v3/internal/database/model"
 	"github.com/mhsanaei/3x-ui/v3/internal/util/common"
@@ -141,8 +142,34 @@ func (s *ClientService) fillProtocolDefaults(c *model.Client, ib *model.Inbound)
 		if c.Auth == "" {
 			c.Auth = strings.ReplaceAll(uuid.NewString(), "-", "")
 		}
+	case model.MTProto:
+		if c.Secret == "" {
+			c.Secret = model.GenerateFakeTLSSecret(mtprotoDomainFromSettings(ib.Settings))
+		}
 	}
 	return nil
+}
+
+// defaultMtprotoDomain is the FakeTLS fronting domain used when an mtproto
+// inbound carries no fakeTlsDomain of its own; it mirrors the frontend default.
+const defaultMtprotoDomain = "www.cloudflare.com"
+
+// mtprotoDomainFromSettings returns the inbound-level FakeTLS domain, falling
+// back to the default when unset, so a generated client secret always fronts a
+// real hostname.
+func mtprotoDomainFromSettings(settings string) string {
+	domain := ""
+	if settings != "" {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(settings), &m); err == nil {
+			domain, _ = m["fakeTlsDomain"].(string)
+		}
+	}
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return defaultMtprotoDomain
+	}
+	return domain
 }
 
 func clientWithInboundFlow(c model.Client, ib *model.Inbound) model.Client {
@@ -191,6 +218,49 @@ func shadowsocksKeyBytes(method string) int {
 		return 32
 	}
 	return 0
+}
+
+// normalizeShadowsocksClientKeys rewrites any Shadowsocks-2022 client password
+// whose decoded length no longer matches settings.method, which happens after the
+// inbound method is switched between ciphers of different key sizes (e.g.
+// aes-256↔aes-128). A wrong-length uPSK makes xray reject the user, so the link
+// fails to connect; regenerating restores a valid key (clients must re-fetch).
+// Non-Shadowsocks / legacy-SS settings pass through unchanged.
+func normalizeShadowsocksClientKeys(settings string) (string, bool) {
+	method := shadowsocksMethodFromSettings(settings)
+	if shadowsocksKeyBytes(method) == 0 {
+		return settings, false
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(settings), &m); err != nil {
+		return settings, false
+	}
+	clients, ok := m["clients"].([]any)
+	if !ok {
+		return settings, false
+	}
+	changed := false
+	for i := range clients {
+		c, ok := clients[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		if pw, _ := c["password"].(string); validShadowsocksClientKey(method, pw) {
+			continue
+		}
+		c["password"] = randomShadowsocksClientKey(method)
+		clients[i] = c
+		changed = true
+	}
+	if !changed {
+		return settings, false
+	}
+	m["clients"] = clients
+	bs, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return settings, false
+	}
+	return string(bs), true
 }
 
 func applyShadowsocksClientMethod(clients []any, settings map[string]any) {
@@ -353,6 +423,33 @@ func (s *ClientService) Update(inboundSvc *InboundService, id int, updated model
 		return needRestart, err
 	}
 
+	// Persist the group explicitly. SyncInbound deliberately preserves the
+	// stored group when the inbound settings carry none — so a node snapshot or a
+	// group-less settings rebuild can't wipe it (see SyncInbound + its tests).
+	// That guard also meant clearing the group in the client editor never took
+	// effect. The editor always round-trips the field, so apply it here,
+	// including the empty string that removes the client from its group.
+	if err := database.GetDB().Model(&model.ClientRecord{}).
+		Where("id = ?", id).
+		UpdateColumn("group_name", updated.Group).Error; err != nil {
+		return needRestart, err
+	}
+
+	// Same shape as the group write above: SyncInbound keeps a stored ad-tag
+	// when the incoming settings carry none, so clearing the override must be
+	// applied here, where the editor always round-trips the field.
+	if err := database.GetDB().Model(&model.ClientRecord{}).
+		Where("id = ?", id).
+		UpdateColumn("ad_tag", updated.AdTag).Error; err != nil {
+		return needRestart, err
+	}
+
+	if err := database.GetDB().Model(&model.ClientRecord{}).
+		Where("id = ?", id).
+		UpdateColumn("enable", updated.Enable).Error; err != nil {
+		return needRestart, err
+	}
+
 	if err := database.GetDB().Model(&model.ClientRecord{}).
 		Where("id = ?", id).
 		UpdateColumn("updated_at", time.Now().UnixMilli()).Error; err != nil {
@@ -389,7 +486,7 @@ func (s *ClientService) Delete(inboundSvc *InboundService, id int, keepTraffic b
 		if existing.Email == "" {
 			continue
 		}
-		nr, delErr := s.DelInboundClientByEmail(inboundSvc, ibId, existing.Email, false)
+		nr, delErr := s.DelInboundClientByEmail(inboundSvc, ibId, existing.Email, false, true)
 		if delErr != nil {
 			// The client is already absent from this inbound (data drift or a
 			// retried delete). Skip it — deletion stays idempotent.
@@ -404,21 +501,34 @@ func (s *ClientService) Delete(inboundSvc *InboundService, id int, keepTraffic b
 	}
 
 	db := database.GetDB()
-	if err := db.Where("client_id = ?", id).Delete(&model.ClientInbound{}).Error; err != nil {
-		return needRestart, err
-	}
-	if !keepTraffic && existing.Email != "" {
-		if err := db.Where("email = ?", existing.Email).Delete(&xray.ClientTraffic{}).Error; err != nil {
-			return needRestart, err
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if existing.Email != "" {
+			if err := adjustGroupBaselinesForRemovedTraffic(tx, []string{existing.Email}); err != nil {
+				return err
+			}
 		}
-		if err := clearGlobalTraffic(db, existing.Email); err != nil {
-			return needRestart, err
+		if err := tx.Where("client_id = ?", id).Delete(&model.ClientInbound{}).Error; err != nil {
+			return err
 		}
-		if err := db.Where("client_email = ?", existing.Email).Delete(&model.InboundClientIps{}).Error; err != nil {
-			return needRestart, err
+		if err := tx.Where("client_id = ?", id).Delete(&model.ClientExternalLink{}).Error; err != nil {
+			return err
 		}
-	}
-	if err := db.Delete(&model.ClientRecord{}, id).Error; err != nil {
+		if !keepTraffic && existing.Email != "" {
+			if err := tx.Where("email = ?", existing.Email).Delete(&xray.ClientTraffic{}).Error; err != nil {
+				return err
+			}
+			if err := clearGlobalTraffic(tx, existing.Email); err != nil {
+				return err
+			}
+			if err := tx.Where("client_email = ?", existing.Email).Delete(&model.InboundClientIps{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("email = ?", existing.Email).Delete(&model.NodeClientTraffic{}).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Delete(&model.ClientRecord{}, id).Error
+	}); err != nil {
 		return needRestart, err
 	}
 	return needRestart, nil
@@ -537,7 +647,7 @@ func (s *ClientService) DeleteByEmail(inboundSvc *InboundService, email string, 
 	}
 	needRestart := false
 	for _, ibId := range inboundIds {
-		nr, delErr := s.DelInboundClientByEmail(inboundSvc, ibId, email, false)
+		nr, delErr := s.DelInboundClientByEmail(inboundSvc, ibId, email, false, true)
 		if delErr != nil {
 			if errors.Is(delErr, ErrClientNotInInbound) {
 				continue
@@ -557,6 +667,9 @@ func (s *ClientService) DeleteByEmail(inboundSvc *InboundService, email string, 
 			return needRestart, err
 		}
 		if err := db.Where("client_email = ?", email).Delete(&model.InboundClientIps{}).Error; err != nil {
+			return needRestart, err
+		}
+		if err := db.Where("email = ?", email).Delete(&model.NodeClientTraffic{}).Error; err != nil {
 			return needRestart, err
 		}
 	}
@@ -600,7 +713,7 @@ func (s *ClientService) Detach(inboundSvc *InboundService, id int, inboundIds []
 		if existing.Email == "" {
 			continue
 		}
-		nr, delErr := s.DelInboundClientByEmail(inboundSvc, ibId, existing.Email, true)
+		nr, delErr := s.DelInboundClientByEmail(inboundSvc, ibId, existing.Email, true, false)
 		if delErr != nil {
 			if errors.Is(delErr, ErrClientNotInInbound) {
 				continue

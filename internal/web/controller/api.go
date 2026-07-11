@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/mhsanaei/3x-ui/v3/internal/web/middleware"
-	"github.com/mhsanaei/3x-ui/v3/internal/web/service"
 	"github.com/mhsanaei/3x-ui/v3/internal/web/service/panel"
 	"github.com/mhsanaei/3x-ui/v3/internal/web/service/tgbot"
 	"github.com/mhsanaei/3x-ui/v3/internal/web/session"
@@ -19,9 +18,9 @@ type APIController struct {
 	inboundController     *InboundController
 	serverController      *ServerController
 	nodeController        *NodeController
+	hostController        *HostController
 	settingController     *SettingController
 	xraySettingController *XraySettingController
-	settingService        service.SettingService
 	userService           panel.UserService
 	apiTokenService       panel.ApiTokenService
 	Tgbot                 tgbot.Tgbot
@@ -35,6 +34,17 @@ func NewAPIController(g *gin.RouterGroup) *APIController {
 }
 
 func (a *APIController) checkAPIAuth(c *gin.Context) {
+	// A verified client certificate (a completed mTLS handshake) authenticates
+	// the caller, equivalent to a valid bearer token. api_authed must be set so
+	// the CSRF middleware lets cert-authed mutations through.
+	if c.Request.TLS != nil && len(c.Request.TLS.VerifiedChains) > 0 {
+		if u, err := a.userService.GetFirstUser(); err == nil {
+			session.SetAPIAuthUser(c, u)
+		}
+		c.Set("api_authed", true)
+		c.Next()
+		return
+	}
 	auth := c.GetHeader("Authorization")
 	if after, ok := strings.CutPrefix(auth, "Bearer "); ok {
 		tok := after
@@ -63,6 +73,9 @@ func (a *APIController) initRouter(g *gin.RouterGroup) {
 	// Main API group
 	api := g.Group("/panel/api")
 	api.Use(a.checkAPIAuth)
+	// Decode + verify the node config envelope (zstd + X-Config-Sha256) and
+	// advertise support, before CSRF/handlers read the body.
+	api.Use(middleware.ConfigEnvelopeMiddleware())
 	api.Use(middleware.CSRFMiddleware())
 
 	// Inbounds API
@@ -80,6 +93,10 @@ func (a *APIController) initRouter(g *gin.RouterGroup) {
 	// Nodes API — multi-panel management
 	nodes := api.Group("/nodes")
 	a.nodeController = NewNodeController(nodes)
+
+	// Hosts API — per-inbound override endpoints for subscription links
+	hosts := api.Group("/hosts")
+	a.hostController = NewHostController(hosts)
 
 	// Settings + Xray config management live under the API surface too, so the
 	// same API token drives them. Paths are /panel/api/setting/* and

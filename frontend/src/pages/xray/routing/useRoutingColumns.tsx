@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Dropdown, Tag } from 'antd';
+import { Button, Dropdown, Switch, Tag } from 'antd';
 import {
   MoreOutlined,
   EditOutlined,
@@ -15,7 +15,7 @@ import type { ColumnsType } from 'antd/es/table';
 
 import { useInboundOptions } from '@/api/queries/useInboundOptions';
 import CriterionRow from './CriterionRow';
-import { buildRemarkByTag, formatInboundTagList, inboundTagsDisplayTitle } from './helpers';
+import { buildRemarkByTag, formatInboundTagList, inboundTagsDisplayTitle, isApiRule } from './helpers';
 import type { RuleRow } from './types';
 
 interface RoutingColumnsParams {
@@ -28,6 +28,7 @@ interface RoutingColumnsParams {
   moveUp: (idx: number) => void;
   moveDown: (idx: number) => void;
   confirmDelete: (idx: number) => void;
+  toggleRule: (idx: number, enabled: boolean) => void;
 }
 
 export function useRoutingColumns({
@@ -40,6 +41,7 @@ export function useRoutingColumns({
   moveUp,
   moveDown,
   confirmDelete,
+  toggleRule,
 }: RoutingColumnsParams): ColumnsType<RuleRow> {
   const { t } = useTranslation();
   const { data: inboundOptions } = useInboundOptions();
@@ -49,42 +51,65 @@ export function useRoutingColumns({
       {
         title: '#',
         align: 'center',
-        width: 100,
-        key: 'action',
+        width: 60,
+        key: 'index',
         render: (_v, _r, index) => (
-          <div className="action-cell">
+          <div className="action-cell" style={{ justifyContent: 'center' }}>
             <HolderOutlined
               className="drag-handle"
               title={t('pages.xray.routing.dragToReorder')}
+              aria-hidden="true"
               onPointerDown={(ev: React.PointerEvent) => onHandlePointerDown(index, ev)}
             />
             <span className="row-index">{index + 1}</span>
-            <div className={!isMobile ? 'action-buttons' : ''}>
-              {!isMobile && (
-                <Button shape="circle" size="small" icon={<EditOutlined />} onClick={() => openEdit(index)} />
-              )}
-              <Dropdown
-                trigger={['click']}
-                menu={{
-                  items: [
-                    ...(isMobile
-                      ? [{ key: 'edit', label: <><EditOutlined /> {t('edit')}</>, onClick: () => openEdit(index) }]
-                      : []),
-                    { key: 'up', label: <ArrowUpOutlined />, disabled: index === 0, onClick: () => moveUp(index) },
-                    {
-                      key: 'down',
-                      label: <ArrowDownOutlined />,
-                      disabled: index === rowsLength - 1,
-                      onClick: () => moveDown(index),
-                    },
-                    { key: 'del', danger: true, label: <><DeleteOutlined /> {t('delete')}</>, onClick: () => confirmDelete(index) },
-                  ],
-                }}
-              >
-                <Button shape="circle" size="small" icon={<MoreOutlined />} />
-              </Dropdown>
-            </div>
           </div>
+        ),
+      },
+      {
+        title: t('pages.clients.actions'),
+        align: 'center',
+        width: 80,
+        key: 'action',
+        render: (_v, _r, index) => (
+          <div className={!isMobile ? 'action-buttons' : ''} style={{ justifyContent: 'center', margin: 0 }}>
+            {!isMobile && (
+              <Button shape="circle" size="small" icon={<EditOutlined />} aria-label={t('edit')} onClick={() => openEdit(index)} />
+            )}
+            <Dropdown
+              trigger={['click']}
+              menu={{
+                items: [
+                  ...(isMobile
+                    ? [{ key: 'edit', label: <><EditOutlined /> {t('edit')}</>, onClick: () => openEdit(index) }]
+                    : []),
+                  { key: 'up', label: <><ArrowUpOutlined /> {t('pages.inbounds.form.moveUp')}</>, disabled: index === 0, onClick: () => moveUp(index) },
+                  {
+                    key: 'down',
+                    label: <><ArrowDownOutlined /> {t('pages.inbounds.form.moveDown')}</>,
+                    disabled: index === rowsLength - 1,
+                    onClick: () => moveDown(index),
+                  },
+                  { key: 'del', danger: true, label: <><DeleteOutlined /> {t('delete')}</>, onClick: () => confirmDelete(index) },
+                ],
+              }}
+            >
+              <Button shape="circle" size="small" icon={<MoreOutlined />} aria-label={t('more')} />
+            </Dropdown>
+          </div>
+        ),
+      },
+      {
+        title: t('enable'),
+        align: 'center',
+        width: 80,
+        key: 'enabled',
+        render: (_v, _r, index) => (
+          <Switch
+            size="small"
+            checked={_r.enabled !== false}
+            onChange={(checked) => toggleRule(index, checked)}
+            disabled={isApiRule(_r)}
+          />
         ),
       },
       {
@@ -109,7 +134,7 @@ export function useRoutingColumns({
         key: 'network',
         render: (_v, record) => (
           <div className="criterion-flow">
-            {record.network && <CriterionRow label="L4" value={record.network} title={`L4: ${record.network}`} />}
+            {record.network && <CriterionRow label="L4" value={record.network.toUpperCase()} title={`L4: ${record.network.toUpperCase()}`} />}
             {record.protocol && <CriterionRow label="Protocol" value={record.protocol} title={`Protocol: ${record.protocol}`} />}
             {record.attrs && <CriterionRow label="Attrs" value={record.attrs} title={`Attrs: ${record.attrs}`} />}
             {!record.network && !record.protocol && !record.attrs && <span className="criterion-empty">—</span>}
@@ -160,7 +185,7 @@ export function useRoutingColumns({
         render: (_v, record) =>
           record.outboundTag ? (
             <div className="target-row">
-              <ExportOutlined className="target-icon" />
+              <ExportOutlined className="target-icon" aria-hidden="true" />
               <Tag color="green">{record.outboundTag}</Tag>
             </div>
           ) : (
@@ -176,7 +201,7 @@ export function useRoutingColumns({
         render: (_v, record) =>
           record.balancerTag ? (
             <div className="target-row">
-              <ClusterOutlined className="target-icon" />
+              <ClusterOutlined className="target-icon" aria-hidden="true" />
               <Tag color="purple">{record.balancerTag}</Tag>
             </div>
           ) : (
@@ -184,6 +209,6 @@ export function useRoutingColumns({
           ),
       },
     ],
-    [t, isMobile, rowsLength, showSource, showBalancer, remarkByTag, onHandlePointerDown, openEdit, moveUp, moveDown, confirmDelete],
+    [t, isMobile, rowsLength, showSource, showBalancer, remarkByTag, onHandlePointerDown, openEdit, moveUp, moveDown, confirmDelete, toggleRule],
   );
 }

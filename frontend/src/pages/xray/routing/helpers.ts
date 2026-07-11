@@ -69,6 +69,13 @@ export function inboundTagChipPreview(
   return chipPreviewParts(formatInboundTagList(tags, remarkByTag));
 }
 
+/** The internal api rule (stats traffic) — its enabled state must stay locked on. */
+export function isApiRule(rule: { outboundTag?: string; inboundTag?: string | string[] }): boolean {
+  if (rule.outboundTag !== 'api') return false;
+  const tags = Array.isArray(rule.inboundTag) ? rule.inboundTag : csv(rule.inboundTag);
+  return tags.includes('api');
+}
+
 export function ruleCriteriaChips(rule: RuleRow) {
   const chips: { label: string; value?: string }[] = [];
   if (rule.domain) chips.push({ label: 'Domain', value: rule.domain });
@@ -76,7 +83,7 @@ export function ruleCriteriaChips(rule: RuleRow) {
   if (rule.port) chips.push({ label: 'Port', value: rule.port });
   if (rule.sourceIP) chips.push({ label: 'Src IP', value: rule.sourceIP });
   if (rule.sourcePort) chips.push({ label: 'Src Port', value: rule.sourcePort });
-  if (rule.network) chips.push({ label: 'L4', value: rule.network });
+  if (rule.network) chips.push({ label: 'L4', value: rule.network.toUpperCase() });
   if (rule.protocol) chips.push({ label: 'Protocol', value: rule.protocol });
   if (rule.user) chips.push({ label: 'User', value: rule.user });
   if (rule.vlessRoute) chips.push({ label: 'VLESS', value: rule.vlessRoute });

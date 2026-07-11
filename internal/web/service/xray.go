@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -31,6 +32,7 @@ var (
 type XrayService struct {
 	inboundService InboundService
 	settingService SettingService
+	nodeService    NodeService
 	xrayAPI        xray.XrayAPI
 }
 
@@ -94,7 +96,7 @@ func (s *XrayService) GetXrayVersion() string {
 	if p == nil {
 		return "Unknown"
 	}
-	return p.GetVersion()
+	return p.GetXrayVersion()
 }
 
 // RemoveIndex removes an element at the specified index from a slice.
@@ -118,6 +120,11 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 	xrayConfig.LogConfig = resolveXrayLogPaths(xrayConfig.LogConfig)
 	xrayConfig.API = ensureAPIServices(xrayConfig.API)
 	xrayConfig.Policy = ensureStatsPolicy(xrayConfig.Policy)
+	xrayConfig.RouterConfig = stripDisabledRules(xrayConfig.RouterConfig)
+	// Template outbounds authored before the xray-core #6258 XHTTP rename may
+	// still carry sessionPlacement/sessionKey; lift them too (same reason as
+	// the per-inbound lift below).
+	xrayConfig.OutboundConfigs = liftOutboundsXhttpSessionIDKeys(xrayConfig.OutboundConfigs)
 
 	_, _, _ = s.inboundService.AddTraffic(nil, nil)
 
@@ -136,7 +143,7 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 			continue
 		}
 		settings := map[string]any{}
-		json.Unmarshal([]byte(inbound.Settings), &settings)
+		_ = json.Unmarshal([]byte(inbound.Settings), &settings)
 
 		dbClients, listErr := s.inboundService.clientService.ListForInbound(nil, inbound.Id)
 		if listErr != nil {
@@ -150,6 +157,7 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 		}
 
 		var finalClients []any
+		var wgPeers []any
 		for i := range dbClients {
 			c := dbClients[i]
 			if enable, exists := enableMap[c.Email]; exists && !enable {
@@ -197,14 +205,27 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 				if c.Auth != "" {
 					entry["auth"] = c.Auth
 				}
+			case model.WireGuard:
+				wgPeers = append(wgPeers, model.WireguardPeerFromClient(c))
+				continue
 			}
 			finalClients = append(finalClients, entry)
 		}
 
-		_, hadClients := settings["clients"]
-		mutated := hadClients || len(finalClients) > 0
-		if mutated {
-			settings["clients"] = finalClients
+		var mutated bool
+		if inbound.Protocol == model.WireGuard {
+			delete(settings, "clients")
+			if wgPeers == nil {
+				wgPeers = []any{}
+			}
+			settings["peers"] = wgPeers
+			mutated = true
+		} else {
+			_, hadClients := settings["clients"]
+			mutated = hadClients || len(finalClients) > 0
+			if mutated {
+				settings["clients"] = finalClients
+			}
 		}
 
 		if inboundCanHostFallbacks(inbound) {
@@ -233,7 +254,7 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 		if len(inbound.StreamSettings) > 0 {
 			// Unmarshal stream JSON
 			var stream map[string]any
-			json.Unmarshal([]byte(inbound.StreamSettings), &stream)
+			_ = json.Unmarshal([]byte(inbound.StreamSettings), &stream)
 
 			// Remove the "settings" field under "tlsSettings" and "realitySettings"
 			tlsSettings, ok1 := stream["tlsSettings"].(map[string]any)
@@ -247,6 +268,24 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 			}
 
 			delete(stream, "externalProxy")
+
+			// finalmask.tcp + REALITY panics Xray-core on the first connection
+			// (XTLS/Xray-core#6453). AddInbound/UpdateInbound reject this
+			// combination at save time, but a row saved before that guard
+			// existed (upgrade, node sync, restored backup, direct DB edit)
+			// would still crash Xray on the next restart without this — drop
+			// it here too, the same way liftXhttpSessionIDKeys and
+			// HealShadowsocksClientMethods heal other legacy data in place.
+			if len(finalMaskRealityTcpMasks(stream)) > 0 {
+				logger.Warningf("Inbound %q: dropping finalmask, incompatible with REALITY security (crashes Xray-core, see XTLS/Xray-core#6453)", inbound.Tag)
+				delete(stream, "finalmask")
+			}
+
+			// xray-core v26.6.22 (#6258) renamed the XHTTP session keys and
+			// kept no fallback. Lift legacy sessionPlacement/sessionKey onto the
+			// new names here so inbounds stored before the rename keep working
+			// without the admin re-saving them.
+			liftXhttpSessionIDKeys(stream)
 
 			newStream, err := json.MarshalIndent(stream, "", "  ")
 			if err != nil {
@@ -294,6 +333,13 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 		logger.Warning("read panelOutbound setting failed:", err)
 	} else if egressTag != "" {
 		injectPanelEgress(xrayConfig, egressTag)
+	}
+
+	nodes, err := s.nodeService.GetAll()
+	if err != nil {
+		logger.Warning("read nodes for egress injection failed:", err)
+	} else {
+		injectNodeEgresses(xrayConfig, nodes)
 	}
 
 	return xrayConfig, nil
@@ -370,6 +416,88 @@ func injectPanelEgress(cfg *xray.Config, outboundTag string) {
 		Settings: json_util.RawMessage(`{"auth":"noauth","udp":false}`),
 		Tag:      PanelEgressInboundTag,
 	})
+}
+
+// NodeEgressInboundTag returns the loopback SOCKS inbound tag for a given node.
+func NodeEgressInboundTag(nodeID int) string {
+	return fmt.Sprintf("node-egress-%d", nodeID)
+}
+
+// nodeEgressBasePort is the first port tried for node egress bridges.
+const nodeEgressBasePort = 62800
+
+// injectNodeEgresses appends a loopback SOCKS inbound per enabled node that has
+// an OutboundTag, and prepends a routing rule sending that inbound's traffic to
+// the selected outbound tag. These bridges are hot-appliable.
+func injectNodeEgresses(cfg *xray.Config, nodes []*model.Node) {
+	routing := map[string]any{}
+	if len(cfg.RouterConfig) > 0 {
+		if err := json.Unmarshal(cfg.RouterConfig, &routing); err != nil {
+			logger.Warning("node egress: routing section is unparsable, skipping injection:", err)
+			return
+		}
+	}
+
+	used := make(map[int]struct{}, len(cfg.InboundConfigs))
+	usedTags := make(map[string]struct{}, len(cfg.InboundConfigs))
+	for i := range cfg.InboundConfigs {
+		used[cfg.InboundConfigs[i].Port] = struct{}{}
+		usedTags[cfg.InboundConfigs[i].Tag] = struct{}{}
+	}
+
+	rules, _ := routing["rules"].([]any)
+	newRules := make([]any, 0)
+
+	for _, n := range nodes {
+		if !n.Enable || n.OutboundTag == "" {
+			continue
+		}
+		tag := NodeEgressInboundTag(n.Id)
+		if _, exists := usedTags[tag]; exists {
+			logger.Warning("node egress: inbound tag [", tag, "] already exists, skipping")
+			continue
+		}
+		usedTags[tag] = struct{}{}
+
+		rule := map[string]any{
+			"type":       "field",
+			"inboundTag": []any{tag},
+		}
+		if routingTagIsBalancer(routing, n.OutboundTag) {
+			rule["balancerTag"] = n.OutboundTag
+		} else {
+			rule["outboundTag"] = n.OutboundTag
+		}
+		newRules = append(newRules, rule)
+
+		port := nodeEgressBasePort + n.Id
+		for {
+			if _, taken := used[port]; !taken {
+				break
+			}
+			port++
+		}
+		used[port] = struct{}{}
+
+		cfg.InboundConfigs = append(cfg.InboundConfigs, xray.InboundConfig{
+			Listen:   json_util.RawMessage(`"127.0.0.1"`),
+			Port:     port,
+			Protocol: "socks",
+			Settings: json_util.RawMessage(`{"auth":"noauth","udp":false}`),
+			Tag:      tag,
+		})
+	}
+
+	if len(newRules) == 0 {
+		return
+	}
+	routing["rules"] = append(newRules, rules...)
+	newRouting, err := json.Marshal(routing)
+	if err != nil {
+		logger.Warning("node egress: failed to rebuild routing section, skipping injection:", err)
+		return
+	}
+	cfg.RouterConfig = json_util.RawMessage(newRouting)
 }
 
 // routingTagIsBalancer reports whether tag names a balancer in the parsed
@@ -484,7 +612,7 @@ func mergeSubscriptionOutbounds(cfg *xray.Config, prepend, appendList []any) {
 			return
 		}
 	}
-	merged := make([]any, 0, len(prepend)+len(templateOutbounds)+len(appendList))
+	var merged []any
 	merged = append(merged, prepend...)
 	merged = append(merged, templateOutbounds...)
 	merged = append(merged, appendList...)
@@ -620,6 +748,59 @@ func resolveXrayLogPaths(logCfg json_util.RawMessage) json_util.RawMessage {
 	return out
 }
 
+// stripDisabledRules removes routing rules marked `enabled: false` from the
+// generated runtime config and strips the panel-only `enabled` key from the
+// rest, since xray-core has no such field. The internal api rule is always
+// kept (see isApiRule) so traffic stats can't be toggled off. The stored
+// template is untouched — only the generated config is filtered.
+func stripDisabledRules(routerCfg json_util.RawMessage) json_util.RawMessage {
+	if len(routerCfg) == 0 {
+		return routerCfg
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(routerCfg, &parsed); err != nil {
+		return routerCfg
+	}
+	rules, ok := parsed["rules"].([]any)
+	if !ok || len(rules) == 0 {
+		return routerCfg
+	}
+
+	var activeRules []any
+	changed := false
+	for _, rawRule := range rules {
+		rule, ok := rawRule.(map[string]any)
+		if !ok {
+			activeRules = append(activeRules, rawRule)
+			continue
+		}
+
+		if enabledRaw, exists := rule["enabled"]; exists {
+			// The internal api rule carries traffic stats and must never be
+			// dropped, even if it was somehow marked disabled.
+			enabled, ok := enabledRaw.(bool)
+			if ok && !enabled && !isApiRule(rule) {
+				changed = true
+				continue
+			}
+			delete(rule, "enabled")
+			changed = true
+		}
+		activeRules = append(activeRules, rule)
+	}
+
+	if !changed {
+		return routerCfg
+	}
+
+	parsed["rules"] = activeRules
+	out, err := json.Marshal(parsed)
+	if err != nil {
+		return routerCfg
+	}
+	return out
+}
+
 // GetXrayTraffic fetches the current traffic statistics from the running Xray process.
 func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
 	if !s.IsXrayRunning() {
@@ -724,16 +905,63 @@ func (s *XrayService) GetBalancersStatus(tags []string) ([]BalancerStatus, error
 }
 
 // OverrideBalancer forces a balancer in the running core to use the given
-// outbound tag; an empty target clears the override.
+// outbound tag; an empty target clears the override. When target names
+// another balancer, the override resolves to the loopback outbound that
+// routes traffic through the target balancer via the routing rules.
 func (s *XrayService) OverrideBalancer(tag, target string) error {
 	if !s.IsXrayRunning() {
 		return errors.New("xray is not running")
+	}
+	if target != "" {
+		resolved, err := s.resolveOverrideTarget(target)
+		if err != nil {
+			return err
+		}
+		if resolved != "" {
+			target = resolved
+		}
 	}
 	if err := s.xrayAPI.Init(p.GetAPIPort()); err != nil {
 		return err
 	}
 	defer s.xrayAPI.Close()
 	return s.xrayAPI.SetBalancerTarget(tag, target)
+}
+
+// resolveOverrideTarget checks if target names a balancer and, if so,
+// returns the loopback outbound tag that routes to it through the
+// routing rules. Returns empty if target is already a concrete outbound.
+func (s *XrayService) resolveOverrideTarget(target string) (string, error) {
+	template, err := s.settingService.GetXrayConfigTemplate()
+	if err != nil {
+		return "", err
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(template), &cfg); err != nil {
+		return "", err
+	}
+	routing, _ := cfg["routing"].(map[string]any)
+	if routing == nil {
+		return "", nil
+	}
+	rules, _ := routing["rules"].([]any)
+	for _, r := range rules {
+		rule, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		if rule["balancerTag"] != target {
+			continue
+		}
+		inboundTags, ok := rule["inboundTag"].([]any)
+		if !ok || len(inboundTags) == 0 {
+			continue
+		}
+		if lbTag, ok := inboundTags[0].(string); ok && strings.HasPrefix(lbTag, "_bl_") {
+			return lbTag, nil
+		}
+	}
+	return "", nil
 }
 
 // TestRoute asks the running core which outbound its router picks for the
@@ -775,7 +1003,7 @@ func (s *XrayService) RestartXray(isForce bool) error {
 			logger.Info("Xray config changes applied through the core API, no restart needed")
 			return nil
 		}
-		p.Stop()
+		_ = p.Stop()
 	}
 
 	p = xray.NewProcess(xrayConfig)
@@ -822,6 +1050,12 @@ func (s *XrayService) tryHotApply(newCfg *xray.Config) bool {
 
 	// Removals first so changed handlers and port swaps never collide with
 	// the additions that follow.
+	for _, u := range diff.RemovedUsers {
+		if err := hotAPI.RemoveUser(u.Tag, u.Email); err != nil && !xray.IsMissingHandlerErr(err) {
+			logger.Info("hot apply: remove user [", u.Email, "] from [", u.Tag, "] failed:", err)
+			return false
+		}
+	}
 	for _, tag := range diff.RemovedInboundTags {
 		if err := hotAPI.DelInbound(tag); err != nil && !xray.IsMissingHandlerErr(err) {
 			logger.Info("hot apply: remove inbound [", tag, "] failed:", err)
@@ -846,6 +1080,12 @@ func (s *XrayService) tryHotApply(newCfg *xray.Config) bool {
 			return false
 		}
 	}
+	for _, u := range diff.AddedUsers {
+		if err := addUserReconciling(&hotAPI, u); err != nil {
+			logger.Info("hot apply: add user [", u.Email, "] to [", u.Tag, "] failed:", err)
+			return false
+		}
+	}
 	if diff.RoutingConfig != nil {
 		if err := hotAPI.ApplyRoutingConfig(diff.RoutingConfig); err != nil {
 			logger.Info("hot apply: apply routing config failed:", err)
@@ -855,6 +1095,19 @@ func (s *XrayService) tryHotApply(newCfg *xray.Config) bool {
 
 	p.SetConfig(newCfg)
 	return true
+}
+
+// addUserReconciling adds a user, and on an email conflict (the user was
+// already applied through the runtime API) replaces the existing user instead.
+func addUserReconciling(api *xray.XrayAPI, u xray.UserOp) error {
+	err := api.AddUser(u.Protocol, u.Tag, u.User)
+	if err == nil || !xray.IsUserExistsErr(err) {
+		return err
+	}
+	if delErr := api.RemoveUser(u.Tag, u.Email); delErr != nil && !xray.IsMissingHandlerErr(delErr) {
+		return delErr
+	}
+	return api.AddUser(u.Protocol, u.Tag, u.User)
 }
 
 // addInboundReconciling adds an inbound, and on a tag conflict (the handler
@@ -932,4 +1185,61 @@ func (s *XrayService) IsNeedRestartAndSetFalse() bool {
 // DidXrayCrash checks if Xray crashed by verifying it's not running and wasn't manually stopped.
 func (s *XrayService) DidXrayCrash() bool {
 	return !s.IsXrayRunning() && !isManuallyStopped.Load()
+}
+
+// liftXhttpSessionIDKeys renames the legacy XHTTP session keys
+// (sessionPlacement/sessionKey) to the v26.6.22 #6258 names
+// (sessionIDPlacement/sessionIDKey) inside a streamSettings map. xray-core kept
+// no fallback for the old names, so a config stored before the rename would be
+// silently ignored by the engine. Returns true if it changed anything.
+func liftXhttpSessionIDKeys(stream map[string]any) bool {
+	xhttp, ok := stream["xhttpSettings"].(map[string]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for legacy, renamed := range map[string]string{
+		"sessionPlacement": "sessionIDPlacement",
+		"sessionKey":       "sessionIDKey",
+	} {
+		v, has := xhttp[legacy]
+		if !has {
+			continue
+		}
+		if _, exists := xhttp[renamed]; !exists {
+			xhttp[renamed] = v
+		}
+		delete(xhttp, legacy)
+		changed = true
+	}
+	return changed
+}
+
+// liftOutboundsXhttpSessionIDKeys applies liftXhttpSessionIDKeys to every
+// outbound's streamSettings in the raw outbounds array. The original bytes are
+// returned untouched when nothing needs lifting, so an unchanged config never
+// looks modified to the hot-reload diff.
+func liftOutboundsXhttpSessionIDKeys(raw json_util.RawMessage) json_util.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var outbounds []map[string]any
+	if err := json.Unmarshal(raw, &outbounds); err != nil {
+		return raw
+	}
+	changed := false
+	for _, ob := range outbounds {
+		if stream, ok := ob["streamSettings"].(map[string]any); ok {
+			if liftXhttpSessionIDKeys(stream) {
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return raw
+	}
+	if rewritten, err := json.Marshal(outbounds); err == nil {
+		return rewritten
+	}
+	return raw
 }

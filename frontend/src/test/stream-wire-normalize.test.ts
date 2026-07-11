@@ -10,7 +10,9 @@ import {
   validateRealityTarget,
 } from '@/lib/xray/stream-wire-normalize';
 import { InboundFormSchema } from '@/schemas/forms/inbound-form';
+import { HappyEyeballsSchema } from '@/schemas/protocols/stream/sockopt';
 import type { InboundFormValues } from '@/schemas/forms/inbound-form';
+import { XHttpXmuxSchema } from '@/schemas/protocols/stream/xhttp';
 
 describe('validateRealityTarget', () => {
   it('accepts host:port and bare port', () => {
@@ -53,6 +55,28 @@ describe('normalizeXhttpForWire stream-one', () => {
     expect(out).not.toHaveProperty('headers');
   });
 
+  it('preserves non-default scMinPostsIntervalMs on inbound for subscriptions', () => {
+    const out = normalizeXhttpForWire({
+      path: '/app',
+      mode: 'packet-up',
+      scMinPostsIntervalMs: '50-150',
+      enableXmux: false,
+    }, 'inbound');
+
+    expect(out.scMinPostsIntervalMs).toBe('50-150');
+  });
+
+  it('strips empty scMinPostsIntervalMs on inbound', () => {
+    const out = normalizeXhttpForWire({
+      path: '/app',
+      mode: 'packet-up',
+      scMinPostsIntervalMs: '',
+      enableXmux: false,
+    }, 'inbound');
+
+    expect(out).not.toHaveProperty('scMinPostsIntervalMs');
+  });
+
   it('keeps xmux on outbound stream-one', () => {
     const out = normalizeXhttpForWire({
       path: '/app',
@@ -66,7 +90,7 @@ describe('normalizeXhttpForWire stream-one', () => {
     expect(out).not.toHaveProperty('scMaxEachPostBytes');
   });
 
-  it('keeps inbound xmux when enableXmux is on (for the share-link extra)', () => {
+  it('keeps inbound xmux when enableXmux is on (stored for subscription extra; stripped from xray config on Go side)', () => {
     const out = normalizeXhttpForWire({
       path: '/app',
       mode: 'auto',
@@ -128,6 +152,21 @@ describe('normalizeXhttpForWire stream-one', () => {
     expect(xmux).not.toHaveProperty('maxConcurrency');
     expect(xmux.maxConnections).toBe('8');
   });
+
+  it('defaults xmux maxConnections to 6 (xray-core anti-RKN default) and drops maxConcurrency on the wire', () => {
+    expect(XHttpXmuxSchema.parse({}).maxConnections).toBe(6);
+
+    const out = normalizeXhttpForWire({
+      path: '/app',
+      mode: 'stream-one',
+      enableXmux: true,
+      xmux: XHttpXmuxSchema.parse({}),
+    }, 'outbound');
+
+    const xmux = out.xmux as Record<string, unknown>;
+    expect(xmux.maxConnections).toBe(6);
+    expect(xmux).not.toHaveProperty('maxConcurrency');
+  });
 });
 
 describe('normalizeSockoptForWire', () => {
@@ -165,6 +204,22 @@ describe('normalizeSockoptForWire', () => {
       prioritizeIPv6: true,
     });
     expect(out?.domainStrategy).toBe('UseIP');
+  });
+
+  it('keeps a freshly toggled happyEyeballs (schema defaults) across the wire round trip', () => {
+    const out = normalizeSockoptForWire({
+      happyEyeballs: HappyEyeballsSchema.parse({}),
+    });
+
+    expect(out?.happyEyeballs).toEqual({ tryDelayMs: 250 });
+  });
+
+  it('keeps an explicit tryDelayMs of 0 so it cannot rehydrate as the 250 default', () => {
+    const out = normalizeSockoptForWire({
+      happyEyeballs: { tryDelayMs: 0, prioritizeIPv6: true, interleave: 1, maxConcurrentTry: 4 },
+    });
+
+    expect(out?.happyEyeballs).toEqual({ tryDelayMs: 0, prioritizeIPv6: true });
   });
 });
 
@@ -339,6 +394,102 @@ describe('inbound formValuesToWirePayload integration', () => {
     const tls = stream.tlsSettings as Record<string, unknown>;
     const settings = tls.settings as Record<string, unknown>;
     expect(settings).not.toHaveProperty('fingerprint');
+  });
+
+  it('preserves non-default scMinPostsIntervalMs in packet-up inbound wire payload for subscriptions', () => {
+    const values = {
+      remark: 't',
+      enable: true,
+      port: 443,
+      listen: '0.0.0.0',
+      tag: 'in-443',
+      expiryTime: 0,
+      sniffing: { enabled: false },
+      up: 0,
+      down: 0,
+      total: 0,
+      trafficReset: 'never',
+      lastTrafficResetTime: 0,
+      nodeId: null,
+      protocol: 'vless',
+      settings: { clients: [{ id: '7eeb09ed-ae97-400d-a1ce-2485fb904407', email: 'n' }], decryption: 'none' },
+      streamSettings: {
+        network: 'xhttp',
+        security: 'reality',
+        realitySettings: {
+          target: 'play.google.com:443',
+          privateKey: 'priv',
+          serverNames: ['play.google.com'],
+          shortIds: ['44003d86dc1e'],
+          settings: { publicKey: 'pub', fingerprint: 'chrome', spiderX: '/' },
+        },
+        xhttpSettings: {
+          path: '/app',
+          host: 'play.google.com',
+          mode: 'packet-up',
+          scMinPostsIntervalMs: '50-150',
+        },
+        sockopt: {},
+      },
+    };
+
+    const parsed = InboundFormSchema.safeParse(values);
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) throw parsed.error;
+
+    const payload = formValuesToWirePayload(parsed.data);
+    const stream = JSON.parse(payload.streamSettings) as Record<string, unknown>;
+    const xhttp = stream.xhttpSettings as Record<string, unknown>;
+
+    expect(xhttp.scMinPostsIntervalMs).toBe('50-150');
+  });
+
+  it('strips default scMinPostsIntervalMs=30 from inbound wire payload', () => {
+    const values = {
+      remark: 't',
+      enable: true,
+      port: 443,
+      listen: '0.0.0.0',
+      tag: 'in-443',
+      expiryTime: 0,
+      sniffing: { enabled: false },
+      up: 0,
+      down: 0,
+      total: 0,
+      trafficReset: 'never',
+      lastTrafficResetTime: 0,
+      nodeId: null,
+      protocol: 'vless',
+      settings: { clients: [{ id: '7eeb09ed-ae97-400d-a1ce-2485fb904407', email: 'n' }], decryption: 'none' },
+      streamSettings: {
+        network: 'xhttp',
+        security: 'reality',
+        realitySettings: {
+          target: 'play.google.com:443',
+          privateKey: 'priv',
+          serverNames: ['play.google.com'],
+          shortIds: ['44003d86dc1e'],
+          settings: { publicKey: 'pub', fingerprint: 'chrome', spiderX: '/' },
+        },
+        xhttpSettings: {
+          path: '/app',
+          host: 'play.google.com',
+          mode: 'packet-up',
+          scMinPostsIntervalMs: '30',
+        },
+        sockopt: {},
+      },
+    };
+
+    const parsed = InboundFormSchema.safeParse(values);
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) throw parsed.error;
+
+    const payload = formValuesToWirePayload(parsed.data);
+    const stream = JSON.parse(payload.streamSettings) as Record<string, unknown>;
+    const xhttp = stream.xhttpSettings as Record<string, unknown>;
+
+    expect(xhttp).not.toHaveProperty('scMinPostsIntervalMs');
   });
 });
 

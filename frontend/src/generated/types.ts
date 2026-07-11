@@ -3,6 +3,7 @@ export type OnlineAPISupport = number;
 export type ProcessState = string;
 export type Protocol = string;
 export type SubLinkProvider = unknown;
+export type staticEgressResolver = string;
 export type transportBits = number;
 
 export interface AllSetting {
@@ -21,6 +22,7 @@ export interface AllSetting {
   ldapFlagField: string;
   ldapHost: string;
   ldapInboundTags: string;
+  ldapInsecureSkipVerify: boolean;
   ldapInvertFlag: boolean;
   ldapPassword: string;
   ldapPort: number;
@@ -32,9 +34,19 @@ export interface AllSetting {
   ldapVlessField: string;
   pageSize: number;
   panelOutbound: string;
-  remarkModel: string;
+  remarkTemplate: string;
   restartXrayOnClientDisable: boolean;
   sessionMaxAge: number;
+  smtpCpu: number;
+  smtpEnable: boolean;
+  smtpEnabledEvents: string;
+  smtpEncryptionType: string;
+  smtpHost: string;
+  smtpMemory: number;
+  smtpPassword: string;
+  smtpPort: number;
+  smtpTo: string;
+  smtpUsername: string;
   subAnnounce: string;
   subCertFile: string;
   subClashEnable: boolean;
@@ -43,10 +55,12 @@ export interface AllSetting {
   subClashRules: string;
   subClashURI: string;
   subDomain: string;
-  subEmailInRemark: boolean;
   subEnable: boolean;
   subEnableRouting: boolean;
   subEncrypt: boolean;
+  subHideSettings: boolean;
+  subIncyEnableRouting: boolean;
+  subIncyRoutingRules: string;
   subJsonEnable: boolean;
   subJsonFinalMask: string;
   subJsonMux: string;
@@ -59,7 +73,6 @@ export interface AllSetting {
   subPort: number;
   subProfileUrl: string;
   subRoutingRules: string;
-  subShowInfo: boolean;
   subSupportUrl: string;
   subThemeDir: string;
   subTitle: string;
@@ -69,11 +82,12 @@ export interface AllSetting {
   tgBotBackup: boolean;
   tgBotChatId: string;
   tgBotEnable: boolean;
-  tgBotLoginNotify: boolean;
   tgBotProxy: string;
   tgBotToken: string;
   tgCpu: number;
+  tgEnabledEvents: string;
   tgLang: string;
+  tgMemory: number;
   tgRunTime: string;
   timeLocation: string;
   trafficDiff: number;
@@ -97,6 +111,7 @@ export interface AllSettingView {
   hasApiToken: boolean;
   hasLdapPassword: boolean;
   hasNordSecret: boolean;
+  hasSmtpPassword: boolean;
   hasTgBotToken: boolean;
   hasTwoFactorToken: boolean;
   hasWarpSecret: boolean;
@@ -111,6 +126,7 @@ export interface AllSettingView {
   ldapFlagField: string;
   ldapHost: string;
   ldapInboundTags: string;
+  ldapInsecureSkipVerify: boolean;
   ldapInvertFlag: boolean;
   ldapPassword: string;
   ldapPort: number;
@@ -122,9 +138,19 @@ export interface AllSettingView {
   ldapVlessField: string;
   pageSize: number;
   panelOutbound: string;
-  remarkModel: string;
+  remarkTemplate: string;
   restartXrayOnClientDisable: boolean;
   sessionMaxAge: number;
+  smtpCpu: number;
+  smtpEnable: boolean;
+  smtpEnabledEvents: string;
+  smtpEncryptionType: string;
+  smtpHost: string;
+  smtpMemory: number;
+  smtpPassword: string;
+  smtpPort: number;
+  smtpTo: string;
+  smtpUsername: string;
   subAnnounce: string;
   subCertFile: string;
   subClashEnable: boolean;
@@ -133,10 +159,12 @@ export interface AllSettingView {
   subClashRules: string;
   subClashURI: string;
   subDomain: string;
-  subEmailInRemark: boolean;
   subEnable: boolean;
   subEnableRouting: boolean;
   subEncrypt: boolean;
+  subHideSettings: boolean;
+  subIncyEnableRouting: boolean;
+  subIncyRoutingRules: string;
   subJsonEnable: boolean;
   subJsonFinalMask: string;
   subJsonMux: string;
@@ -149,7 +177,6 @@ export interface AllSettingView {
   subPort: number;
   subProfileUrl: string;
   subRoutingRules: string;
-  subShowInfo: boolean;
   subSupportUrl: string;
   subThemeDir: string;
   subTitle: string;
@@ -159,11 +186,12 @@ export interface AllSettingView {
   tgBotBackup: boolean;
   tgBotChatId: string;
   tgBotEnable: boolean;
-  tgBotLoginNotify: boolean;
   tgBotProxy: string;
   tgBotToken: string;
   tgCpu: number;
+  tgEnabledEvents: string;
   tgLang: string;
+  tgMemory: number;
   tgRunTime: string;
   timeLocation: string;
   trafficDiff: number;
@@ -196,6 +224,8 @@ export interface ApiTokenView {
 }
 
 export interface Client {
+  adTag?: string;
+  allowedIPs?: string[];
   auth?: string;
   comment: string;
   created_at?: number;
@@ -205,10 +235,15 @@ export interface Client {
   flow?: string;
   group?: string;
   id?: string;
+  keepAlive?: number;
   limitIp: number;
   password?: string;
+  preSharedKey?: string;
+  privateKey?: string;
+  publicKey?: string;
   reset: number;
   reverse?: ClientReverse | null;
+  secret?: string;
   security: string;
   subId: string;
   tgId: number;
@@ -224,6 +259,8 @@ export interface ClientInbound {
 }
 
 export interface ClientRecord {
+  adTag: string;
+  allowedIPs: string;
   auth: string;
   comment: string;
   createdAt: number;
@@ -233,10 +270,15 @@ export interface ClientRecord {
   flow: string;
   group: string;
   id: number;
+  keepAlive: number;
   limitIp: number;
   password: string;
+  preSharedKey: string;
+  privateKey: string;
+  publicKey: string;
   reset: number;
   reverse: unknown;
+  secret: string;
   security: string;
   subId: string;
   tgId: number;
@@ -272,6 +314,77 @@ export interface FallbackParentInfo {
 export interface HistoryOfSeeders {
   id: number;
   seederName: string;
+}
+
+export interface Host {
+  address: string;
+  allowInsecure: boolean;
+  alpn: string[];
+  createdAt: number;
+  echConfigList: string;
+  excludeFromSubTypes: string[];
+  finalMask: string;
+  fingerprint: string;
+  groupId: string;
+  hostHeader: string;
+  id: number;
+  inboundId: number;
+  isDisabled: boolean;
+  isHidden: boolean;
+  keepSniBlank: boolean;
+  mihomoIpVersion: string;
+  mihomoX25519: boolean;
+  muxParams: unknown;
+  nodeGuids?: string[];
+  overrideSniFromAddress: boolean;
+  path: string;
+  pinnedPeerCertSha256: string[];
+  port: number;
+  remark: string;
+  security: string;
+  serverDescription: string;
+  shuffleHost: boolean;
+  sni: string;
+  sockoptParams: unknown;
+  sortOrder: number;
+  tags: string[];
+  updatedAt: number;
+  verifyPeerCertByName: string;
+  vlessRoute: string;
+}
+
+export interface HostGroup {
+  allowInsecure: boolean;
+  alpn: string[];
+  echConfigList: string;
+  excludeFromSubTypes: string[];
+  finalMask: string;
+  fingerprint: string;
+  groupId: string;
+  hostHeader: string;
+  hosts: string[];
+  inboundIds: number[];
+  isDisabled: boolean;
+  isHidden: boolean;
+  keepSniBlank: boolean;
+  mihomoIpVersion: string;
+  mihomoX25519: boolean;
+  muxParams: string;
+  nodeGuids: string[];
+  overrideSniFromAddress: boolean;
+  path: string;
+  pinnedPeerCertSha256: string[];
+  port: number;
+  remark: string;
+  security: string;
+  serverDescription: string;
+  shuffleHost: boolean;
+  sni: string;
+  sockoptParams: string;
+  sortOrder: number;
+  tags: string[];
+  verifyPeerCertByName: string;
+  vlessRoute: string;
 }
 
 export interface Inbound {
@@ -319,14 +432,23 @@ export interface InboundFallback {
 }
 
 export interface InboundOption {
+  enable: boolean;
   id: number;
+  listen?: string;
+  mtprotoDomain?: string;
+  nodeAddress?: string;
   nodeId?: number | null;
   port: number;
   protocol: string;
   remark: string;
+  shareAddr?: string;
+  shareAddrStrategy?: string;
   ssMethod: string;
   tag: string;
   tlsFlowCapable: boolean;
+  wgDns?: string;
+  wgMtu?: number;
+  wgPublicKey?: string;
 }
 
 export interface Msg {
@@ -336,6 +458,7 @@ export interface Msg {
 }
 
 export interface Node {
+  activeCount: number;
   address: string;
   allowPrivateAddress: boolean;
   apiToken: string;
@@ -346,6 +469,7 @@ export interface Node {
   cpuPct: number;
   createdAt: number;
   depletedCount: number;
+  disabledCount: number;
   enable: boolean;
   guid: string;
   id: number;
@@ -357,7 +481,10 @@ export interface Node {
   latencyMs: number;
   memPct: number;
   name: string;
+  netDown: number;
+  netUp: number;
   onlineCount: number;
+  outboundTag: string;
   panelVersion: string;
   parentGuid?: string;
   pinnedCertSha256: string;
@@ -382,6 +509,13 @@ export interface OutboundTraffics {
   up: number;
 }
 
+export interface PanelUpdateStatus {
+  exitCode: number;
+  finishedAt: number;
+  runId: string;
+  state: string;
+}
+
 export interface ProbeResultUI {
   cpuPct: number;
   error: string;
@@ -393,6 +527,27 @@ export interface ProbeResultUI {
   xrayError: string;
   xrayState: string;
   xrayVersion: string;
+}
+
+export interface RealityScanResult {
+  alpn: string;
+  certIssuer: string;
+  certSubject: string;
+  certValid: boolean;
+  curveID: string;
+  feasible: boolean;
+  h2: boolean;
+  host: string;
+  ip: string;
+  latencyMs: number;
+  notAfter: string;
+  port: number;
+  reason: string;
+  serverNames: string[];
+  target: string;
+  tls13: boolean;
+  tlsVersion: string;
+  x25519: boolean;
 }
 
 export interface Setting {

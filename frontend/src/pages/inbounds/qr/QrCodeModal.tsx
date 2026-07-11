@@ -26,7 +26,6 @@ interface QrCodeModalProps {
   onClose: () => void;
   dbInbound: (DbInboundLike & { remark?: string }) | null;
   client?: ClientSetting | null;
-  remarkModel?: string;
   nodeAddress?: string;
   subSettings?: SubSettings;
 }
@@ -36,6 +35,7 @@ interface QrItem {
   header: string;
   value: string;
   downloadName?: string;
+  showQr?: boolean;
 }
 
 export default function QrCodeModal({
@@ -43,7 +43,6 @@ export default function QrCodeModal({
   onClose,
   dbInbound,
   client = null,
-  remarkModel = '-io',
   nodeAddress = '',
   subSettings,
 }: QrCodeModalProps) {
@@ -67,7 +66,6 @@ export default function QrCodeModal({
         genWireguardConfigs({
           inbound,
           remark: peerRemark,
-          remarkModel: '-io',
           hostOverride: nodeAddress,
           fallbackHostname,
         }).split('\r\n'),
@@ -76,7 +74,6 @@ export default function QrCodeModal({
         genWireguardLinks({
           inbound,
           remark: peerRemark,
-          remarkModel: '-io',
           hostOverride: nodeAddress,
           fallbackHostname,
         }).split('\r\n'),
@@ -87,7 +84,6 @@ export default function QrCodeModal({
         genAllLinks({
           inbound,
           remark: dbInbound.remark || '',
-          remarkModel,
           client: client ?? {},
           hostOverride: nodeAddress,
           fallbackHostname,
@@ -106,7 +102,7 @@ export default function QrCodeModal({
     }
     setSubLink(nextSub);
     setSubJsonLink(nextSubJson);
-  }, [open, dbInbound, client, remarkModel, nodeAddress, subSettings]);
+  }, [open, dbInbound, client, nodeAddress, subSettings]);
 
   const qrItems = useMemo<QrItem[]>(() => {
     const items: QrItem[] = [];
@@ -127,7 +123,7 @@ export default function QrCodeModal({
         downloadName: `peer-${idx + 1}.conf`,
       });
       if (wireguardLinks[idx]) {
-        items.push({ key: `wl${idx}`, header: `Peer ${idx + 1} link`, value: wireguardLinks[idx] });
+        items.push({ key: `wl${idx}`, header: `Peer ${idx + 1} link`, value: wireguardLinks[idx], showQr: false });
       }
     });
     return items;
@@ -142,7 +138,7 @@ export default function QrCodeModal({
           value={item.value}
           remark={item.header}
           downloadName={item.downloadName || ''}
-          showQr={!isPostQuantumLink(item.value)}
+          showQr={item.showQr !== false && !isPostQuantumLink(item.value)}
         />
       ),
     })),
