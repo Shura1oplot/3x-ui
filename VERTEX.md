@@ -5,6 +5,7 @@ docker build --platform linux/amd64 -t vertex:latest -f Vertex.Dockerfile .
 docker image tag vertex:latest shura1oplot/vertex:latest
 docker image push shura1oplot/vertex:latest
 
+---
 
 docker image pull shura1oplot/vertex:latest
 
