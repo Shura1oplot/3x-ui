@@ -37,12 +37,12 @@ type SubService struct {
 	// other context — the sub info page, the panel's link/QR displays — renders
 	// the name-only template, like Remnawave.
 	subscriptionBody bool
-	// usageShown tracks, per client email, whether the info part of the template
-	// has already been emitted this request, so it appears on the first body
-	// link only. Per-request state; reset in PrepareForRequest.
-	usageShown     map[string]bool
-	inboundService service.InboundService
-	settingService service.SettingService
+	// usageShown emits info once per subscription identity, including twins.
+	// PrepareForRequest resets this per-request state.
+	usageShown             map[string]bool
+	showIdentityOnAllLinks bool
+	inboundService         service.InboundService
+	settingService         service.SettingService
 	// nodesByID is populated per request from the Node table so
 	// resolveInboundAddress can return the node's address for any
 	// inbound whose NodeID is set. Keeps the per-link host derivation
@@ -196,6 +196,10 @@ func (s *SubService) loadRemarkSettings() {
 	s.datepicker, err = s.settingService.GetDatepicker()
 	if err != nil {
 		s.datepicker = "gregorian"
+	}
+	s.showIdentityOnAllLinks, err = s.settingService.GetSubShowIdentityOnAllLinks()
+	if err != nil {
+		s.showIdentityOnAllLinks = false
 	}
 }
 
@@ -644,8 +648,8 @@ func (s *SubService) genWireguardLink(inbound *model.Inbound, email string) stri
 			params["publickey"] = pub
 		}
 	}
-	if len(client.AllowedIPs) > 0 && client.AllowedIPs[0] != "" {
-		params["address"] = client.AllowedIPs[0]
+	if joined := strings.Join(client.AllowedIPs, ","); joined != "" {
+		params["address"] = joined
 	}
 	if mtu, ok := settings["mtu"].(float64); ok && mtu > 0 {
 		params["mtu"] = strconv.Itoa(int(mtu))
@@ -714,7 +718,7 @@ func (s *SubService) genVmessLink(inbound *model.Inbound, email string) string {
 		return ""
 	}
 	obj["id"] = client.ID
-	obj["scy"] = client.Security
+	obj["scy"] = normalizeVmessSecurity(client.Security)
 
 	externalProxies, _ := stream["externalProxy"].([]any)
 
@@ -724,6 +728,18 @@ func (s *SubService) genVmessLink(inbound *model.Inbound, email string) string {
 
 	obj["ps"] = s.genRemark(inbound, email, "", network)
 	return buildVmessLink(obj)
+}
+
+// normalizeVmessSecurity maps the vmess security values xray-core v26.7.11
+// removed ("none"/"zero"), plus the legacy empty string, to "auto" so links
+// and subscriptions stop advertising values the upgraded server rejects on
+// the wire.
+func normalizeVmessSecurity(security string) string {
+	switch security {
+	case "", "none", "zero":
+		return "auto"
+	}
+	return security
 }
 
 // vlessEncryptionEnabled reports whether the VLESS inbound settings enable
@@ -769,7 +785,7 @@ func (s *SubService) genVlessLink(inbound *model.Inbound, email string) string {
 	}
 	uuid := client.ID
 	port := inbound.Port
-	streamNetwork := stream["network"].(string)
+	streamNetwork, _ := stream["network"].(string)
 	params := make(map[string]string)
 	params["type"] = streamNetwork
 
@@ -828,7 +844,7 @@ func (s *SubService) genTrojanLink(inbound *model.Inbound, email string) string 
 	}
 	password := encodeUserinfo(client.Password)
 	port := inbound.Port
-	streamNetwork := stream["network"].(string)
+	streamNetwork, _ := stream["network"].(string)
 	params := make(map[string]string)
 	params["type"] = streamNetwork
 
@@ -901,9 +917,9 @@ func (s *SubService) genShadowsocksLink(inbound *model.Inbound, email string) st
 	}
 
 	settings := s.linkSettings(inbound)
-	inboundPassword := settings["password"].(string)
-	method := settings["method"].(string)
-	streamNetwork := stream["network"].(string)
+	inboundPassword, _ := settings["password"].(string)
+	method, _ := settings["method"].(string)
+	streamNetwork, _ := stream["network"].(string)
 	params := make(map[string]string)
 	params["type"] = streamNetwork
 
@@ -981,7 +997,9 @@ func (s *SubService) genHysteriaLink(inbound *model.Inbound, email string) strin
 	alpns, _ := tlsSetting["alpn"].([]any)
 	var alpn []string
 	for _, a := range alpns {
-		alpn = append(alpn, a.(string))
+		if s, ok := a.(string); ok {
+			alpn = append(alpn, s)
+		}
 	}
 	if len(alpn) > 0 {
 		params["alpn"] = strings.Join(alpn, ",")
@@ -1011,11 +1029,10 @@ func (s *SubService) genHysteriaLink(inbound *model.Inbound, email string) strin
 		}
 	}
 
-	// salamander obfs (Hysteria2). The panel-side link generator already
-	// emits these; keep the subscription output in sync so a client has
-	// the obfs password to match the server.
+	// salamander obfs (Hysteria2). Emit only the standard URI fields;
+	// the non-standard fm=<json> finalmask dump breaks mihomo and other
+	// Hysteria2 clients that reject unknown query params.
 	if finalmask, ok := stream["finalmask"].(map[string]any); ok {
-		applyFinalMaskParams(finalmask, params)
 		if udpMasks, ok := finalmask["udp"].([]any); ok {
 			for _, m := range udpMasks {
 				mask, _ := m.(map[string]any)
@@ -1168,7 +1185,7 @@ func unmarshalStreamSettings(streamSettings string) map[string]any {
 }
 
 func applyPathAndHostParams(settings map[string]any, params map[string]string) {
-	params["path"] = settings["path"].(string)
+	params["path"], _ = settings["path"].(string)
 	if host, ok := settings["host"].(string); ok && len(host) > 0 {
 		params["host"] = host
 	} else {
@@ -1178,7 +1195,7 @@ func applyPathAndHostParams(settings map[string]any, params map[string]string) {
 }
 
 func applyPathAndHostObj(settings map[string]any, obj map[string]any) {
-	obj["path"] = settings["path"].(string)
+	obj["path"], _ = settings["path"].(string)
 	if host, ok := settings["host"].(string); ok && len(host) > 0 {
 		obj["host"] = host
 	} else {
@@ -1194,9 +1211,11 @@ func applyShareNetworkParams(stream map[string]any, streamNetwork string, params
 		header, _ := tcp["header"].(map[string]any)
 		typeStr, _ := header["type"].(string)
 		if typeStr == "http" {
-			request := header["request"].(map[string]any)
+			request, _ := header["request"].(map[string]any)
 			requestPath, _ := request["path"].([]any)
-			params["path"] = requestPath[0].(string)
+			if len(requestPath) > 0 {
+				params["path"], _ = requestPath[0].(string)
+			}
 			host := ""
 			if response, ok := header["response"].(map[string]any); ok {
 				if respHeaders, ok := response["headers"].(map[string]any); ok {
@@ -1217,9 +1236,9 @@ func applyShareNetworkParams(stream map[string]any, streamNetwork string, params
 		applyPathAndHostParams(ws, params)
 	case "grpc":
 		grpc, _ := stream["grpcSettings"].(map[string]any)
-		params["serviceName"] = grpc["serviceName"].(string)
+		params["serviceName"], _ = grpc["serviceName"].(string)
 		params["authority"], _ = grpc["authority"].(string)
-		if grpc["multiMode"].(bool) {
+		if mm, _ := grpc["multiMode"].(bool); mm {
 			params["mode"] = "multi"
 		}
 	case "httpupgrade":
@@ -1250,9 +1269,11 @@ func applyVmessNetworkParams(stream map[string]any, network string, obj map[stri
 		typeStr, _ := header["type"].(string)
 		obj["type"] = typeStr
 		if typeStr == "http" {
-			request := header["request"].(map[string]any)
+			request, _ := header["request"].(map[string]any)
 			requestPath, _ := request["path"].([]any)
-			obj["path"] = requestPath[0].(string)
+			if len(requestPath) > 0 {
+				obj["path"], _ = requestPath[0].(string)
+			}
 			host := ""
 			if response, ok := header["response"].(map[string]any); ok {
 				if respHeaders, ok := response["headers"].(map[string]any); ok {
@@ -1272,9 +1293,9 @@ func applyVmessNetworkParams(stream map[string]any, network string, obj map[stri
 		applyPathAndHostObj(ws, obj)
 	case "grpc":
 		grpc, _ := stream["grpcSettings"].(map[string]any)
-		obj["path"] = grpc["serviceName"].(string)
-		obj["authority"] = grpc["authority"].(string)
-		if grpc["multiMode"].(bool) {
+		obj["path"], _ = grpc["serviceName"].(string)
+		obj["authority"], _ = grpc["authority"].(string)
+		if mm, _ := grpc["multiMode"].(bool); mm {
 			obj["type"] = "multi"
 		}
 	case "httpupgrade":
@@ -1296,7 +1317,9 @@ func applyShareTLSParams(stream map[string]any, params map[string]string) {
 	alpns, _ := tlsSetting["alpn"].([]any)
 	var alpn []string
 	for _, a := range alpns {
-		alpn = append(alpn, a.(string))
+		if s, ok := a.(string); ok {
+			alpn = append(alpn, s)
+		}
 	}
 	if len(alpn) > 0 {
 		params["alpn"] = strings.Join(alpn, ",")
@@ -1330,7 +1353,9 @@ func applyVmessTLSParams(stream map[string]any, obj map[string]any) {
 	if len(alpns) > 0 {
 		var alpn []string
 		for _, a := range alpns {
-			alpn = append(alpn, a.(string))
+			if s, ok := a.(string); ok {
+				alpn = append(alpn, s)
+			}
 		}
 		obj["alpn"] = strings.Join(alpn, ",")
 	}
@@ -1439,15 +1464,17 @@ func applyShareRealityParams(stream map[string]any, params map[string]string, cl
 	realitySettings, _ := searchKey(realitySetting, "settings")
 	if realitySetting != nil {
 		if sniValue, ok := searchKey(realitySetting, "serverNames"); ok {
-			sNames, _ := sniValue.([]any)
-			params["sni"] = sNames[random.Num(len(sNames))].(string)
+			if sNames, _ := sniValue.([]any); len(sNames) > 0 {
+				params["sni"], _ = sNames[random.Num(len(sNames))].(string)
+			}
 		}
 		if pbkValue, ok := searchKey(realitySettings, "publicKey"); ok {
 			params["pbk"], _ = pbkValue.(string)
 		}
 		if sidValue, ok := searchKey(realitySetting, "shortIds"); ok {
-			shortIds, _ := sidValue.([]any)
-			params["sid"] = shortIds[random.Num(len(shortIds))].(string)
+			if shortIds, _ := sidValue.([]any); len(shortIds) > 0 {
+				params["sid"], _ = shortIds[random.Num(len(shortIds))].(string)
+			}
 		}
 		if fpValue, ok := searchKey(realitySettings, "fingerprint"); ok {
 			if fp, ok := fpValue.(string); ok && len(fp) > 0 {
@@ -1602,12 +1629,6 @@ func applyExternalProxyTLSToStream(ep map[string]any, stream map[string]any, sec
 	}
 	if fp, ok := ep["fingerprint"].(string); ok && fp != "" {
 		tlsSettings["fingerprint"] = fp
-		settings, _ := tlsSettings["settings"].(map[string]any)
-		if settings == nil {
-			settings = map[string]any{}
-			tlsSettings["settings"] = settings
-		}
-		settings["fingerprint"] = fp
 	}
 	if alpn, ok := externalProxyALPNList(ep["alpn"]); ok {
 		tlsSettings["alpn"] = alpn
@@ -1995,6 +2016,15 @@ func buildXhttpExtra(xhttp map[string]any) map[string]any {
 			}
 		}
 	}
+	// Older clients still read the pre-#6258 names from the subscription
+	// extra JSON. Emit aliases after lifting legacy inputs so both old and
+	// new clients can consume the same link.
+	if v, ok := extra["sessionIDPlacement"].(string); ok && len(v) > 0 {
+		extra["sessionPlacement"] = v
+	}
+	if v, ok := extra["sessionIDKey"].(string); ok && len(v) > 0 {
+		extra["sessionKey"] = v
+	}
 
 	for _, field := range []string{"uplinkChunkSize"} {
 		if v, ok := nonZeroShareValue(xhttp[field]); ok {
@@ -2131,6 +2161,7 @@ var validFinalMaskTCPTypes = map[string]struct{}{
 	"header-custom": {},
 	"fragment":      {},
 	"sudoku":        {},
+	"xmc":           {},
 }
 
 // applyKcpShareParams reconstructs legacy KCP share-link fields from either
@@ -2409,12 +2440,13 @@ func searchHost(headers any) string {
 			case []any:
 				hosts, _ := v.([]any)
 				if len(hosts) > 0 {
-					return hosts[0].(string)
-				} else {
-					return ""
+					h, _ := hosts[0].(string)
+					return h
 				}
+				return ""
 			case any:
-				return v.(string)
+				h, _ := v.(string)
+				return h
 			}
 		}
 	}
@@ -2429,6 +2461,7 @@ type PageData struct {
 	BasePath      string
 	SId           string
 	Enabled       bool
+	IsOnline      bool
 	Download      string
 	Upload        string
 	Total         string
@@ -2452,18 +2485,29 @@ type PageData struct {
 // ResolveRequest extracts scheme and host info from request/headers consistently.
 // ResolveRequest extracts scheme, host, and header information from an HTTP request.
 func (s *SubService) ResolveRequest(c *gin.Context) (scheme string, host string, hostWithPort string, hostHeader string) {
+	trusted := s.forwardedHeadersTrusted(c)
+	if !trusted {
+		warnSuppressedForwardedHeaders(c)
+	}
+	forwarded := func(name string) string {
+		if !trusted {
+			return ""
+		}
+		return c.GetHeader(name)
+	}
+
 	// scheme
 	scheme = "http"
-	if c.Request.TLS != nil || strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https") {
+	if c.Request.TLS != nil || strings.EqualFold(forwarded("X-Forwarded-Proto"), "https") {
 		scheme = "https"
 	}
 
 	// base host (no port)
-	if h, err := getHostFromXFH(c.GetHeader("X-Forwarded-Host")); err == nil && h != "" {
+	if h, err := getHostFromXFH(forwarded("X-Forwarded-Host")); err == nil && h != "" {
 		host = h
 	}
 	if host == "" {
-		host = c.GetHeader("X-Real-IP")
+		host = forwarded("X-Real-IP")
 	}
 	if host == "" {
 		var err error
@@ -2474,7 +2518,7 @@ func (s *SubService) ResolveRequest(c *gin.Context) (scheme string, host string,
 	}
 
 	// host:port for URLs
-	hostWithPort = c.GetHeader("X-Forwarded-Host")
+	hostWithPort = forwarded("X-Forwarded-Host")
 	if hostWithPort == "" {
 		hostWithPort = c.Request.Host
 	}
@@ -2483,9 +2527,9 @@ func (s *SubService) ResolveRequest(c *gin.Context) (scheme string, host string,
 	}
 
 	// header display host
-	hostHeader = c.GetHeader("X-Forwarded-Host")
+	hostHeader = forwarded("X-Forwarded-Host")
 	if hostHeader == "" {
-		hostHeader = c.GetHeader("X-Real-IP")
+		hostHeader = forwarded("X-Real-IP")
 	}
 	if hostHeader == "" {
 		hostHeader = host
@@ -2593,6 +2637,7 @@ func (s *SubService) BuildPageData(subId string, hostHeader string, traffic xray
 		BasePath:      basePath,
 		SId:           subId,
 		Enabled:       traffic.Enable,
+		IsOnline:      subIsOnline(emails, s.inboundService.GetOnlineClients()),
 		Download:      download,
 		Upload:        upload,
 		Total:         total,
@@ -2612,6 +2657,22 @@ func (s *SubService) BuildPageData(subId string, hostHeader string, traffic xray
 		Result:        pageLinks,
 		Emails:        pageEmails,
 	}
+}
+
+func subIsOnline(subEmails, onlineEmails []string) bool {
+	if len(subEmails) == 0 || len(onlineEmails) == 0 {
+		return false
+	}
+	onlineSet := make(map[string]struct{}, len(onlineEmails))
+	for _, email := range onlineEmails {
+		onlineSet[email] = struct{}{}
+	}
+	for _, email := range subEmails {
+		if _, online := onlineSet[email]; online {
+			return true
+		}
+	}
+	return false
 }
 
 func getHostFromXFH(s string) (string, error) {

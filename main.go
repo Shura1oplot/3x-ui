@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 	_ "unsafe"
 
 	"github.com/mhsanaei/3x-ui/v3/internal/config"
@@ -31,6 +30,10 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/op/go-logging"
 )
+
+// cliFallbackTokenName is the single token the CLI regenerates, so `-getApiToken`
+// cannot accumulate admin-equivalent credentials that are never revoked.
+const cliFallbackTokenName = "cli-fallback"
 
 // runWebServer initializes and starts the web server for the 3x-ui panel.
 func runWebServer() {
@@ -71,24 +74,20 @@ func runWebServer() {
 		log.Fatalf("Error initializing database: %v", err)
 	}
 
-	var server *web.Server
-	server = web.NewServer()
+	server := web.NewServer()
 	global.SetWebServer(server)
 	err = server.Start()
 	if err != nil {
 		log.Fatalf("Error starting web server: %v", err)
-		return
 	}
 
-	var subServer *sub.Server
 	sub.SetDistFS(web.EmbeddedDist())
 	service.RegisterSubLinkProvider(sub.NewLinkProvider())
-	subServer = sub.NewServer()
+	subServer := sub.NewServer()
 	global.SetSubServer(subServer)
 	err = subServer.Start()
 	if err != nil {
 		log.Fatalf("Error starting sub server: %v", err)
-		return
 	}
 
 	sigCh := make(chan os.Signal, 8)
@@ -142,7 +141,6 @@ func runWebServer() {
 			err = server.StartPanelOnly()
 			if err != nil {
 				log.Fatalf("Error restarting web server: %v", err)
-				return
 			}
 			log.Println("Web server restarted successfully.")
 
@@ -152,7 +150,6 @@ func runWebServer() {
 			err = subServer.Start()
 			if err != nil {
 				log.Fatalf("Error restarting sub server: %v", err)
-				return
 			}
 			log.Println("Sub server restarted successfully.")
 		case sys.SIGUSR1:
@@ -360,7 +357,7 @@ func updateSetting(port int, username string, password string, webBasePath strin
 		if err != nil {
 			fmt.Println("Failed to set listen IP:", err)
 		} else {
-			fmt.Printf("listen %v set successfully", listenIP)
+			fmt.Printf("listen %v set successfully\n", listenIP)
 		}
 	}
 
@@ -461,14 +458,14 @@ func GetApiToken(getApiToken bool) {
 		fmt.Printf("There are %d API token(s) configured. Existing tokens cannot be retrieved in plaintext because only hashes are stored.\n", len(tokens))
 		fmt.Println("If you have lost your token, you can manage and generate new tokens through the Panel UI (Settings -> API Tokens).")
 
-		// Create a new fallback token so the CLI is still useful without the UI
-		fallbackName := fmt.Sprintf("cli-fallback-%d", time.Now().Unix())
-		created, err := apiTokenService.Create(fallbackName)
+		// Rotate one reusable fallback so repeated calls cannot pile up
+		// indefinitely many admin-equivalent tokens that never expire.
+		created, err := apiTokenService.RecreateByName(cliFallbackTokenName)
 		if err != nil {
 			fmt.Println("Failed to create a fallback API token:", err)
 			return
 		}
-		fmt.Println("\nA new fallback token has been generated for your convenience:")
+		fmt.Println("\nThe CLI fallback token has been regenerated (any previous one is now invalid):")
 		fmt.Println("apiToken:", created.Token)
 		return
 	}
@@ -579,7 +576,7 @@ func main() {
 		fmt.Println()
 		fmt.Println("Commands:")
 		fmt.Println("    run            run web panel")
-		fmt.Println("    migrate        migrate form other/old x-ui")
+		fmt.Println("    migrate        migrate from other/old x-ui")
 		fmt.Println("    migrate-db     SQLite <-> .dump (--dump/--restore) or copy into PostgreSQL (--dsn)")
 		fmt.Println("    setting        set settings")
 	}
