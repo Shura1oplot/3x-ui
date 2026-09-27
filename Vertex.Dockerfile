@@ -2,7 +2,7 @@
 # Stage: Frontend (Vite)
 # ========================================================
 
-FROM node:22-trixie AS frontend
+FROM --platform=$BUILDPLATFORM node:26-trixie AS frontend
 
 WORKDIR /src/frontend
 
@@ -20,7 +20,7 @@ RUN npm run build
 # Stage: Builder
 # ========================================================
 
-FROM golang:1.26-trixie AS builder
+FROM golang:1.27-trixie AS builder
 
 WORKDIR /app
 
